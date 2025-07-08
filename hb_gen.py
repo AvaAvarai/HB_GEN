@@ -405,12 +405,12 @@ def evaluate_model(model, X_test, y_test):
     accuracy = np.mean(predictions == y_test)
     return accuracy, predictions
 
-def export_results(results, dataset_name, output_file):
+def export_hyperblocks(results, dataset_name, output_file):
     """
-    Export results to CSV.
+    Export clean hyperblock bounds to CSV.
     
     Args:
-        results: Dictionary containing results
+        results: Dictionary containing results with trained models
         dataset_name: Name of the dataset
         output_file: Output CSV file path
     """
@@ -418,19 +418,40 @@ def export_results(results, dataset_name, output_file):
     export_data = []
     
     for model_name, result in results.items():
-        export_data.append({
-            'Dataset': dataset_name,
-            'Model': model_name,
-            'Training_Time': result['training_time'],
-            'Test_Accuracy': result['accuracy'],
-            'Num_Blocks': result['num_blocks'],
-            'Timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        })
+        model = result['model']  # Get the actual trained model
+        blocks = model.get_blocks()
+        
+        for block_idx, block in enumerate(blocks):
+            # Base block info
+            block_data = {
+                'Model': model_name,
+                'Block_ID': block_idx,
+                'Class': block['class']
+            }
+            
+            # Add bounds per attribute
+            if block['type'] == 'interval':
+                # For interval blocks: min/max bounds
+                for feature_idx, (min_val, max_val) in enumerate(block['intervals']):
+                    block_data[f'Attr_{feature_idx}_Min'] = min_val
+                    block_data[f'Attr_{feature_idx}_Max'] = max_val
+                    
+            elif block['type'] == 'merger':
+                # For merger blocks: center ± radius bounds
+                for feature_idx in range(len(block['center'])):
+                    center = block['center'][feature_idx]
+                    radius = block['radius'][feature_idx]
+                    block_data[f'Attr_{feature_idx}_Min'] = center - radius
+                    block_data[f'Attr_{feature_idx}_Max'] = center + radius
+            
+            export_data.append(block_data)
     
     # Create DataFrame and save
     df = pd.DataFrame(export_data)
     df.to_csv(output_file, index=False)
-    print(f"✓ Results exported to {output_file}")
+    print(f"✓ Hyperblock bounds exported to {output_file}")
+    print(f"  - Total blocks: {len(export_data)}")
+    print(f"  - Models: {list(results.keys())}")
 
 def main():
     """
@@ -494,6 +515,7 @@ def main():
             
             # Store results
             results[model_name] = {
+                'model': model,  # Store the actual trained model
                 'training_time': model.training_time,
                 'accuracy': accuracy,
                 'num_blocks': len(model.get_blocks()),
@@ -504,9 +526,9 @@ def main():
             print(f"  - Test accuracy: {accuracy:.4f}")
             print(f"  - Number of blocks: {len(model.get_blocks())}")
         
-        # Export results
-        output_file = f"hyperblock_results_{dataset_name.replace(' ', '_').replace('(', '').replace(')', '')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        export_results(results, dataset_name, output_file)
+        # Export hyperblocks
+        output_file = f"hyperblocks_{dataset_name.replace(' ', '_').replace('(', '').replace(')', '')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        export_hyperblocks(results, dataset_name, output_file)
         
         # Display summary
         print(f"\n{'='*60}")
