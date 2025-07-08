@@ -562,7 +562,7 @@ class HyperBlockPredictor:
         
         return self._predict_with_k(X, model_name, self.optimal_k[model_name])
     
-    def learn_optimal_k(self, X_train, y_train, max_k=10):
+    def learn_optimal_k(self, X_train, y_train, max_k=21):
         """
         Learn optimal k values for all models.
         
@@ -796,6 +796,10 @@ def main():
         
         # Aggregate results
         avg_results = {}
+        blocks_per_fold = {model_name: [] for model_name in models.keys()}
+        for fold in range(10):
+            for model_name in models.keys():
+                blocks_per_fold[model_name].append(all_fold_results[fold][model_name]['num_blocks'])
         for model_name in models.keys():
             accuracies = [all_fold_results[fold][model_name]['accuracy'] for fold in range(10)]
             avg_accuracy = np.mean(accuracies)
@@ -805,7 +809,7 @@ def main():
                 'std_accuracy': std_accuracy,
                 'fold_accuracies': accuracies,
                 'optimal_k': all_fold_results[0][model_name]['optimal_k'],
-                'num_blocks': np.mean([all_fold_results[fold][model_name]['num_blocks'] for fold in range(10)])
+                'blocks_per_fold': blocks_per_fold[model_name]
             }
         
         # Print results
@@ -819,7 +823,7 @@ def main():
             print(f"Optimal k: {result['optimal_k']}")
             print(f"Mean Accuracy: {result['mean_accuracy']:.4f} ± {result['std_accuracy']:.4f}")
             print(f"Fold Accuracies: {[f'{acc:.4f}' for acc in result['fold_accuracies']]}")
-            print(f"Avg. Number of Blocks: {result['num_blocks']:.2f}")
+            print(f"Number of Blocks per Fold: {result['blocks_per_fold']}")
         
         print("\nDone.")
     
