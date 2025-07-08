@@ -34,6 +34,10 @@ Achieve comparable performance with hyperblock models as to that of a Convolutio
   - Features: 784 (28×28 original pixels)
   - Classes: 10 digits (0-9)
 
+## References
+
+Algorithms used for HB generation from: [Visual Knowledge Discovery with General Line Coordinates](refs/VKD_with_GLC.pdf)
+
 ## License
 
 This project is licensed for free commercial and personal use under the [MIT License](LICENSE).
