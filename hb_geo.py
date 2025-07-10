@@ -15,75 +15,81 @@ def compute_envelope_blocks_for_class(args):
     class_points = X[class_mask]
     other_points = X[other_mask]
 
-    if class_points.shape[0] == 0 or other_points.shape[0] == 0:
+    if class_points.shape[0] == 0:
         return []
 
     num_features = X.shape[1]
     blocks = []
 
-    # Use LDA to find discriminative feature order
+    # Use LDA to find discriminative feature order, but only for this class vs rest
     lda = LinearDiscriminantAnalysis()
     try:
-        lda.fit(X, y)
-        # Get LDA projection
+        # Prepare binary labels: 1 for class c, 0 for others
+        y_binary = (y == c).astype(int)
+        lda.fit(X, y_binary)
         lda_projection = lda.transform(X).flatten()
-        
-        # Calculate covariances between LDA projection and each axis
         feature_covariances = []
         for i in range(num_features):
             axis_values = X[:, i]
-            covariance = np.cov(lda_projection, axis_values)[0, 1]  # Off-diagonal element
+            covariance = np.cov(lda_projection, axis_values)[0, 1]
             feature_covariances.append(abs(covariance))
-        
         feature_importance = np.array(feature_covariances)
     except:
-        # Fallback to uniform importance if LDA fails
         feature_importance = np.ones(num_features)
-    
-    # Sort features by covariance importance (descending)
+
     sorted_features = np.argsort(feature_importance)[::-1]
-    
-    # Create bounds array
+
+    # Initialize bounds for the class
     bounds = np.full((num_features, 2), [np.inf, -np.inf])
     has_intersection = False
 
-    # Wrap-around scanning: each feature sees its left and right neighbors
-    for i in range(len(sorted_features)):
-        # Left neighbor with wrap-around
-        left_idx = sorted_features[i - 1] if i > 0 else sorted_features[-1]
-        # Right neighbor with wrap-around  
-        right_idx = sorted_features[i + 1] if i < len(sorted_features) - 1 else sorted_features[0]
-        
-        # Current feature
-        curr_idx = sorted_features[i]
-        
-        for p in class_points:
-            p_curr = p[curr_idx]
-            p_left = p[left_idx]
-            p_right = p[right_idx]
-            
-            for q in other_points:
-                q_curr = q[curr_idx]
-                q_left = q[left_idx]
-                q_right = q[right_idx]
-                
-                # Check if there's an intersection pattern
-                if ((p_curr - q_curr) * (p_left - q_left) < 0 or 
-                    (p_curr - q_curr) * (p_right - q_right) < 0):
-                    bounds[curr_idx, 0] = min(bounds[curr_idx, 0], p_curr)
-                    bounds[curr_idx, 1] = max(bounds[curr_idx, 1], p_curr)
-                    bounds[left_idx, 0] = min(bounds[left_idx, 0], p_left)
-                    bounds[left_idx, 1] = max(bounds[left_idx, 1], p_left)
-                    bounds[right_idx, 0] = min(bounds[right_idx, 0], p_right)
-                    bounds[right_idx, 1] = max(bounds[right_idx, 1], p_right)
-                    has_intersection = True
+    # First, always create a basic envelope for the class points
+    for p in class_points:
+        for i in range(num_features):
+            bounds[i, 0] = min(bounds[i, 0], p[i])
+            bounds[i, 1] = max(bounds[i, 1], p[i])
 
-    if has_intersection:
-        blocks.append({
-            'class': c,
-            'bounds': bounds.tolist(),
-            'feature_order': sorted_features.tolist()
-        })
+    # If there are other points, try to find intersection patterns for refinement
+    if other_points.shape[0] > 0:
+        refined_bounds = np.full((num_features, 2), [np.inf, -np.inf])
+        
+        # Wrap-around scanning: each feature sees its left and right neighbors
+        for i in range(len(sorted_features)):
+            left_idx = sorted_features[i - 1] if i > 0 else sorted_features[-1]
+            right_idx = sorted_features[i + 1] if i < len(sorted_features) - 1 else sorted_features[0]
+            curr_idx = sorted_features[i]
+
+            for p in class_points:
+                p_curr = p[curr_idx]
+                p_left = p[left_idx]
+                p_right = p[right_idx]
+
+                for q in other_points:
+                    q_curr = q[curr_idx]
+                    q_left = q[left_idx]
+                    q_right = q[right_idx]
+
+                    # Check if there's an intersection pattern
+                    if ((p_curr - q_curr) * (p_left - q_left) < 0 or 
+                        (p_curr - q_curr) * (p_right - q_right) < 0):
+                        refined_bounds[curr_idx, 0] = min(refined_bounds[curr_idx, 0], p_curr)
+                        refined_bounds[curr_idx, 1] = max(refined_bounds[curr_idx, 1], p_curr)
+                        refined_bounds[left_idx, 0] = min(refined_bounds[left_idx, 0], p_left)
+                        refined_bounds[left_idx, 1] = max(refined_bounds[left_idx, 1], p_left)
+                        refined_bounds[right_idx, 0] = min(refined_bounds[right_idx, 0], p_right)
+                        refined_bounds[right_idx, 1] = max(refined_bounds[right_idx, 1], p_right)
+                        has_intersection = True
+
+        # If we found intersection patterns, use the refined bounds
+        if has_intersection:
+            bounds = refined_bounds
+
+    # Always create at least one block for the class
+    blocks.append({
+        'class': c,
+        'bounds': bounds.tolist(),
+        'feature_order': sorted_features.tolist()
+    })
 
     return blocks
 
@@ -91,9 +97,22 @@ def prune_and_merge_blocks(blocks):
     pruned = []
     for b in blocks:
         bounds = np.array(b['bounds'])
-        volume = np.prod(bounds[:, 1] - bounds[:, 0])
-        if np.all(np.isfinite(bounds)) and volume > 1e-6:
-            pruned.append(b)
+        # Ensure bounds are finite and have reasonable volume
+        if np.all(np.isfinite(bounds)):
+            volume = np.prod(bounds[:, 1] - bounds[:, 0])
+            # Be more lenient with volume threshold to preserve basic envelopes
+            if volume > 1e-10:
+                pruned.append(b)
+            else:
+                # If volume is too small, expand bounds slightly to ensure minimum volume
+                expanded_bounds = bounds.copy()
+                for i in range(bounds.shape[0]):
+                    if bounds[i, 1] - bounds[i, 0] < 1e-6:
+                        mid = (bounds[i, 0] + bounds[i, 1]) / 2
+                        expanded_bounds[i, 0] = mid - 1e-6
+                        expanded_bounds[i, 1] = mid + 1e-6
+                b['bounds'] = expanded_bounds.tolist()
+                pruned.append(b)
     return pruned
 
 def deduplicate_blocks(blocks, tolerance=1e-6):
@@ -119,6 +138,7 @@ def find_all_envelope_blocks(X, y, feature_indices, classes):
     encoded_classes = np.unique(y)
     args_list = [(c, X, y, feature_indices) for c in encoded_classes]
     all_blocks = []
+    
     # Use ThreadPoolExecutor to avoid multiprocessing issues
     with ThreadPoolExecutor(max_workers=min(multiprocessing.cpu_count(), 8)) as executor:
         for result in executor.map(compute_envelope_blocks_for_class, args_list):
