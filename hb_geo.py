@@ -338,29 +338,93 @@ def cross_validate_blocks(X, y, feature_indices, classes, k_folds=10):
     return pd.DataFrame({'fold_accuracies': fold_accuracies})
 
 def main():
-    print("Loading dataset...")
-    df = pd.read_csv("datasets/wbc9.csv")
-    features = df.columns[:-1]
-    X_raw = df[features].values
-    y_raw = df['class'].values
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Hyperblock-based classification')
+    parser.add_argument('--train', type=str, help='Path to training dataset CSV')
+    parser.add_argument('--test', type=str, help='Path to test dataset CSV')
+    parser.add_argument('--dataset', type=str, default='datasets/fisher_iris.csv', help='Path to single dataset CSV (default)')
+    
+    args = parser.parse_args()
+    
+    if args.train and args.test:
+        # Load separate train and test datasets
+        print("Loading separate train and test datasets...")
+        df_train = pd.read_csv(args.train)
+        df_test = pd.read_csv(args.test)
+        
+        features = df_train.columns[:-1]  # Assume last column is class
+        X_train_raw = df_train[features].values
+        y_train_raw = df_train['class'].values
+        X_test_raw = df_test[features].values
+        y_test_raw = df_test['class'].values
+        
+        print("Preprocessing data...")
+        scaler = MinMaxScaler()
+        X_train = scaler.fit_transform(X_train_raw)
+        X_test = scaler.transform(X_test_raw)  # Use same scaler
+        
+        y_encoder = LabelEncoder()
+        y_train = y_encoder.fit_transform(y_train_raw)
+        y_test = y_encoder.transform(y_test_raw)  # Use same encoder
+        
+        feature_indices = list(range(X_train.shape[1]))
+        
+        print(f"Training set shape: {X_train.shape}")
+        print(f"Test set shape: {X_test.shape}")
+        print(f"Classes: {y_encoder.classes_}")
+        print(f"Features: {len(feature_indices)}")
+        
+        print("\nRunning cross-validation on training data...")
+        # Pass encoded class numbers for block generation, original names for display
+        scores = cross_validate_blocks(X_train, y_train, feature_indices, y_encoder.classes_)
+        
+        print("\nEvaluating on held-out test set...")
+        # Train on full training set and evaluate on test set
+        blocks = find_all_envelope_blocks(X_train, y_train, feature_indices, y_encoder.classes_)
+        best_norm, best_k = learn_optimal_hyperparameters(X_train, y_train, blocks)
+        
+        df_test_results = classify_with_hyperblocks(X_test, y_test, blocks, k_values=[best_k])
+        
+        if not df_test_results.empty:
+            test_acc = df_test_results.iloc[0]['accuracy']
+            print(f"Test set accuracy: {test_acc:.4f}")
+            print(f"Test set predictions: {df_test_results.iloc[0]['preds']}")
+            
+            # Print confusion matrix for test set
+            test_predictions = df_test_results.iloc[0]['preds']
+            print("Test Set Confusion Matrix:")
+            cm = confusion_matrix(y_test, test_predictions)
+            print(cm)
+        
+        print("\nFinal results:")
+        print(scores)
+        
+    else:
+        # Load single dataset (original behavior)
+        print("Loading dataset...")
+        df = pd.read_csv(args.dataset)
+        features = df.columns[:-1]
+        X_raw = df[features].values
+        y_raw = df['class'].values
 
-    print("Preprocessing data...")
-    scaler = MinMaxScaler()
-    X = scaler.fit_transform(X_raw)
+        print("Preprocessing data...")
+        scaler = MinMaxScaler()
+        X = scaler.fit_transform(X_raw)
 
-    y_encoder = LabelEncoder()
-    y = y_encoder.fit_transform(y_raw)
-    feature_indices = list(range(X.shape[1]))
+        y_encoder = LabelEncoder()
+        y = y_encoder.fit_transform(y_raw)
+        feature_indices = list(range(X.shape[1]))
 
-    print(f"Dataset shape: {X.shape}")
-    print(f"Classes: {y_encoder.classes_}")
-    print(f"Features: {len(feature_indices)}")
+        print(f"Dataset shape: {X.shape}")
+        print(f"Classes: {y_encoder.classes_}")
+        print(f"Features: {len(feature_indices)}")
 
-    print("\nRunning cross-validation...")
-    # Pass encoded class numbers for block generation, original names for display
-    scores = cross_validate_blocks(X, y, feature_indices, y_encoder.classes_)
-    print("\nFinal results:")
-    print(scores)
+        print("\nRunning cross-validation...")
+        # Pass encoded class numbers for block generation, original names for display
+        scores = cross_validate_blocks(X, y, feature_indices, y_encoder.classes_)
+        print("\nFinal results:")
+        print(scores)
 
 if __name__ == "__main__":
     main()
