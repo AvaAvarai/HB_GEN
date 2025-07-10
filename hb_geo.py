@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from itertools import permutations
 from sklearn.metrics import accuracy_score, confusion_matrix
-from sklearn.model_selection import KFold
+from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
 from scipy.spatial.distance import cdist
 from concurrent.futures import ThreadPoolExecutor
@@ -233,10 +233,10 @@ def fold_worker(args):
     return df_results, len(blocks), best_norm, best_k, predictions, y_test
 
 def cross_validate_blocks(X, y, feature_indices, classes, k_folds=10):
-    kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
+    kf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
     args_list = []
     
-    for fold_num, (train_index, test_index) in enumerate(kf.split(X)):
+    for fold_num, (train_index, test_index) in enumerate(kf.split(X, y)):
         args_list.append((train_index, test_index, X, y, feature_indices, classes, fold_num))
 
     # Use ThreadPoolExecutor to avoid multiprocessing issues
