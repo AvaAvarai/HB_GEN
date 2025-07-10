@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from itertools import permutations
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import KFold
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
 from scipy.spatial.distance import cdist
@@ -79,7 +79,9 @@ def distance_to_hyperblock(point, bounds, norm=2):
     return np.linalg.norm(point - projected, ord=norm)
 
 def find_all_envelope_blocks(X, y, feature_indices, classes):
-    args_list = [(c, X, y, feature_indices) for c in classes]
+    # Use encoded class numbers for block generation
+    encoded_classes = np.unique(y)
+    args_list = [(c, X, y, feature_indices) for c in encoded_classes]
     all_blocks = []
     # Use ThreadPoolExecutor to avoid multiprocessing issues
     with ThreadPoolExecutor(max_workers=min(multiprocessing.cpu_count(), 8)) as executor:
@@ -196,6 +198,11 @@ def fold_worker(args):
     # Use only the optimal hyperparameters for testing
     df_results = classify_with_hyperblocks(X_test, y_test, blocks, k_values=[best_k])
     
+    # Get predictions for confusion matrix
+    predictions = []
+    if not df_results.empty:
+        predictions = df_results.iloc[0]['preds']
+    
     # Add fold information properly
     if not df_results.empty:
         df_results['fold_num'] = fold_num
@@ -204,7 +211,7 @@ def fold_worker(args):
         df_results['learned_norm'] = best_norm
         df_results['learned_k'] = best_k
     
-    return df_results, len(blocks), best_norm, best_k
+    return df_results, len(blocks), best_norm, best_k, predictions, y_test
 
 def cross_validate_blocks(X, y, feature_indices, classes, k_folds=10):
     kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
@@ -222,17 +229,27 @@ def cross_validate_blocks(X, y, feature_indices, classes, k_folds=10):
     block_counts = []
     learned_norms = []
     learned_ks = []
+    all_predictions = []
+    all_true_labels = []
     
-    for df, num_blocks, norm, k in all_results:
+    for df, num_blocks, norm, k, predictions, y_test in all_results:
         if not df.empty:
             valid_results.append(df)
             block_counts.append(num_blocks)
             learned_norms.append(norm)
             learned_ks.append(k)
+            all_predictions.append(predictions)
+            all_true_labels.append(y_test)
     
     if not valid_results:
         print("No valid results found across all folds")
         return pd.DataFrame()
+    
+    # Print class mapping once at the beginning
+    print("\nClass mapping:")
+    for class_num in np.unique(y):
+        print(f"  {class_num}: {classes[class_num]}")
+    print()
     
     # Calculate average accuracy across folds
     fold_accuracies = []
@@ -241,19 +258,10 @@ def cross_validate_blocks(X, y, feature_indices, classes, k_folds=10):
             fold_accuracies.append(df.iloc[0]['accuracy'])
     
     if fold_accuracies:
-        avg_accuracy = np.mean(fold_accuracies)
-        std_accuracy = np.std(fold_accuracies)
-        avg_blocks = np.mean(block_counts)
-        std_blocks = np.std(block_counts)
-        
-        print("\nCross-validation results:")
-        print(f"Average accuracy across all folds: {avg_accuracy:.4f} ± {std_accuracy:.4f}")
-        print(f"Average blocks per fold: {avg_blocks:.1f} ± {std_blocks:.1f}")
-        
-        print("\nPer-fold results:")
+        print("Per-fold results:")
         fold_contained = []
         fold_knn = []
-        for i, (df, num_blocks, norm, k) in enumerate(zip(valid_results, block_counts, learned_norms, learned_ks)):
+        for i, (df, num_blocks, norm, k, predictions, y_test) in enumerate(zip(valid_results, block_counts, learned_norms, learned_ks, all_predictions, all_true_labels)):
             if not df.empty:
                 acc = df.iloc[0]['accuracy']
                 contained = df.iloc[0]['contained_count']
@@ -261,13 +269,29 @@ def cross_validate_blocks(X, y, feature_indices, classes, k_folds=10):
                 fold_contained.append(contained)
                 fold_knn.append(knn)
                 print(f"Fold {i+1}: accuracy = {acc:.4f}, blocks = {num_blocks}, contained = {contained}, k-NN = {knn}, norm = {norm}, k = {k}")
+                
+                # Print confusion matrix for this fold
+                print(f"Confusion Matrix (Fold {i+1}):")
+                cm = confusion_matrix(y_test, predictions)
+                print(cm)
+                print()
+        
+        # Print summary statistics at the end
+        avg_accuracy = np.mean(fold_accuracies)
+        std_accuracy = np.std(fold_accuracies)
+        avg_blocks = np.mean(block_counts)
+        std_blocks = np.std(block_counts)
+        
+        print("Cross-validation summary:")
+        print(f"Average accuracy across all folds: {avg_accuracy:.4f} ± {std_accuracy:.4f}")
+        print(f"Average blocks per fold: {avg_blocks:.1f} ± {std_blocks:.1f}")
         
         if fold_contained:
             avg_contained = np.mean(fold_contained)
             std_contained = np.std(fold_contained)
             avg_knn = np.mean(fold_knn)
             std_knn = np.std(fold_knn)
-            print(f"\nAverage contained cases per fold: {avg_contained:.1f} ± {std_contained:.1f}")
+            print(f"Average contained cases per fold: {avg_contained:.1f} ± {std_contained:.1f}")
             print(f"Average k-NN cases per fold: {avg_knn:.1f} ± {std_knn:.1f}")
 
     return pd.DataFrame({'fold_accuracies': fold_accuracies})
@@ -285,14 +309,17 @@ def main():
 
     y_encoder = LabelEncoder()
     y = y_encoder.fit_transform(y_raw)
-    classes = np.unique(y)
     feature_indices = list(range(X.shape[1]))
 
     print(f"Dataset shape: {X.shape}")
-    print(f"Classes: {classes}")
+    print(f"Classes: {y_encoder.classes_}")
     print(f"Features: {len(feature_indices)}")
 
     print("\nRunning cross-validation...")
+    # Pass encoded class numbers for block generation, original names for display
+    scores = cross_validate_blocks(X, y, feature_indices, y_encoder.classes_)
+    print("\nFinal results:")
+    print(scores)
 
 if __name__ == "__main__":
     main()
