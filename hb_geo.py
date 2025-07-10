@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from itertools import permutations
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
@@ -21,47 +21,69 @@ def compute_envelope_blocks_for_class(args):
     num_features = X.shape[1]
     blocks = []
 
-    for perm in permutations(feature_indices):
-        bounds = np.full((num_features, 2), [np.inf, -np.inf])
-        has_intersection = False
+    # Use LDA to find discriminative feature order
+    lda = LinearDiscriminantAnalysis()
+    try:
+        lda.fit(X, y)
+        # Get LDA projection
+        lda_projection = lda.transform(X).flatten()
+        
+        # Calculate covariances between LDA projection and each axis
+        feature_covariances = []
+        for i in range(num_features):
+            axis_values = X[:, i]
+            covariance = np.cov(lda_projection, axis_values)[0, 1]  # Off-diagonal element
+            feature_covariances.append(abs(covariance))
+        
+        feature_importance = np.array(feature_covariances)
+    except:
+        # Fallback to uniform importance if LDA fails
+        feature_importance = np.ones(num_features)
+    
+    # Sort features by covariance importance (descending)
+    sorted_features = np.argsort(feature_importance)[::-1]
+    
+    # Create bounds array
+    bounds = np.full((num_features, 2), [np.inf, -np.inf])
+    has_intersection = False
 
-        # Wrap-around scanning: each feature sees its left and right neighbors
-        for i in range(len(perm)):
-            # Left neighbor with wrap-around
-            left_idx = perm[i - 1] if i > 0 else perm[-1]
-            # Right neighbor with wrap-around  
-            right_idx = perm[i + 1] if i < len(perm) - 1 else perm[0]
+    # Wrap-around scanning: each feature sees its left and right neighbors
+    for i in range(len(sorted_features)):
+        # Left neighbor with wrap-around
+        left_idx = sorted_features[i - 1] if i > 0 else sorted_features[-1]
+        # Right neighbor with wrap-around  
+        right_idx = sorted_features[i + 1] if i < len(sorted_features) - 1 else sorted_features[0]
+        
+        # Current feature
+        curr_idx = sorted_features[i]
+        
+        for p in class_points:
+            p_curr = p[curr_idx]
+            p_left = p[left_idx]
+            p_right = p[right_idx]
             
-            # Current feature
-            curr_idx = perm[i]
-            
-            for p in class_points:
-                p_curr = p[curr_idx]
-                p_left = p[left_idx]
-                p_right = p[right_idx]
+            for q in other_points:
+                q_curr = q[curr_idx]
+                q_left = q[left_idx]
+                q_right = q[right_idx]
                 
-                for q in other_points:
-                    q_curr = q[curr_idx]
-                    q_left = q[left_idx]
-                    q_right = q[right_idx]
-                    
-                    # Check if there's an intersection pattern
-                    if ((p_curr - q_curr) * (p_left - q_left) < 0 or 
-                        (p_curr - q_curr) * (p_right - q_right) < 0):
-                        bounds[curr_idx, 0] = min(bounds[curr_idx, 0], p_curr)
-                        bounds[curr_idx, 1] = max(bounds[curr_idx, 1], p_curr)
-                        bounds[left_idx, 0] = min(bounds[left_idx, 0], p_left)
-                        bounds[left_idx, 1] = max(bounds[left_idx, 1], p_left)
-                        bounds[right_idx, 0] = min(bounds[right_idx, 0], p_right)
-                        bounds[right_idx, 1] = max(bounds[right_idx, 1], p_right)
-                        has_intersection = True
+                # Check if there's an intersection pattern
+                if ((p_curr - q_curr) * (p_left - q_left) < 0 or 
+                    (p_curr - q_curr) * (p_right - q_right) < 0):
+                    bounds[curr_idx, 0] = min(bounds[curr_idx, 0], p_curr)
+                    bounds[curr_idx, 1] = max(bounds[curr_idx, 1], p_curr)
+                    bounds[left_idx, 0] = min(bounds[left_idx, 0], p_left)
+                    bounds[left_idx, 1] = max(bounds[left_idx, 1], p_left)
+                    bounds[right_idx, 0] = min(bounds[right_idx, 0], p_right)
+                    bounds[right_idx, 1] = max(bounds[right_idx, 1], p_right)
+                    has_intersection = True
 
-        if has_intersection:
-            blocks.append({
-                'class': c,
-                'bounds': bounds.tolist(),
-                'perm': perm
-            })
+    if has_intersection:
+        blocks.append({
+            'class': c,
+            'bounds': bounds.tolist(),
+            'feature_order': sorted_features.tolist()
+        })
 
     return blocks
 
@@ -316,8 +338,8 @@ def cross_validate_blocks(X, y, feature_indices, classes, k_folds=10):
     return pd.DataFrame({'fold_accuracies': fold_accuracies})
 
 def main():
-    print("Loading Fisher Iris dataset...")
-    df = pd.read_csv("datasets/fisher_iris.csv")
+    print("Loading dataset...")
+    df = pd.read_csv("datasets/wbc9.csv")
     features = df.columns[:-1]
     X_raw = df[features].values
     y_raw = df['class'].values
