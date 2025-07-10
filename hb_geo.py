@@ -87,10 +87,14 @@ def find_all_envelope_blocks(X, y, feature_indices, classes):
             all_blocks.extend(result)
     return prune_and_merge_blocks(all_blocks)
 
-def classify_with_hyperblocks(X, y, blocks, k_values=range(1, 11)):
+def classify_with_hyperblocks(X, y, blocks, k_values=None):
     if not blocks:
         # Return empty DataFrame with correct structure if no blocks
         return pd.DataFrame(columns=['norm', 'k', 'accuracy', 'preds', 'contained_count', 'knn_count'])
+    
+    # Set default k_values if not provided
+    if k_values is None:
+        k_values = range(1, len(blocks) + 1)
     
     block_bounds = [np.array(b['bounds']) for b in blocks]
     block_labels = [b['class'] for b in blocks]
@@ -99,6 +103,9 @@ def classify_with_hyperblocks(X, y, blocks, k_values=range(1, 11)):
     for norm in [1, 2]:
         dists = np.array([[distance_to_hyperblock(x, bb, norm=norm) for bb in block_bounds] for x in X])
         for k in k_values:
+            if k > len(blocks):
+                continue  # Skip k values larger than number of blocks
+                
             knn_preds = []
             contained_count = 0
             knn_count = 0
@@ -132,20 +139,72 @@ def classify_with_hyperblocks(X, y, blocks, k_values=range(1, 11)):
             })
     return pd.DataFrame(results)
 
+def learn_optimal_hyperparameters(X_train, y_train, blocks):
+    """Learn optimal k and norm values for a given fold using training data."""
+    if not blocks:
+        return 'L2', 1  # Default values if no blocks
+    
+    # Test different norm and k combinations on training data
+    best_accuracy = 0
+    best_norm = 'L2'
+    best_k = 1
+    
+    # Test both L1 and L2 norms
+    for norm in [1, 2]:
+        norm_name = f'L{norm}'
+        
+        # Test k values from 1 to min(10, number of blocks)
+        max_k = min(10, len(blocks))
+        for k in range(1, max_k + 1):
+            # Use training data to evaluate this combination
+            predictions = []
+            for sample in X_train:
+                # Calculate distances to all blocks
+                dists = [distance_to_hyperblock(sample, np.array(b['bounds']), norm=norm) for b in blocks]
+                
+                if min(dists) == 0:
+                    # Point is contained in a block
+                    min_dist_idx = np.argmin(dists)
+                    pred = blocks[min_dist_idx]['class']
+                else:
+                    # Point needs k-NN classification
+                    top_k_indices = np.argsort(dists)[:k]
+                    classes_k = [blocks[i]['class'] for i in top_k_indices]
+                    pred = max(set(classes_k), key=classes_k.count)
+                
+                predictions.append(pred)
+            
+            # Calculate accuracy on training data
+            accuracy = np.mean(np.array(predictions) == y_train)
+            
+            if accuracy > best_accuracy:
+                best_accuracy = accuracy
+                best_norm = norm_name
+                best_k = k
+    
+    return best_norm, best_k
+
 def fold_worker(args):
     train_index, test_index, X, y, feature_indices, classes, fold_num = args
     X_train, X_test = X[train_index], X[test_index]
     y_train, y_test = y[train_index], y[test_index]
     blocks = find_all_envelope_blocks(X_train, y_train, feature_indices, classes)
-    df_results = classify_with_hyperblocks(X_test, y_test, blocks)
+    
+    # Learn optimal hyperparameters for this fold
+    best_norm, best_k = learn_optimal_hyperparameters(X_train, y_train, blocks)
+    
+    # Use only the optimal hyperparameters for testing
+    df_results = classify_with_hyperblocks(X_test, y_test, blocks, k_values=[best_k])
     
     # Add fold information properly
     if not df_results.empty:
         df_results['fold_num'] = fold_num
         df_results['test_size'] = len(test_index)
         df_results['num_blocks'] = len(blocks)
+        df_results['learned_norm'] = best_norm
+        df_results['learned_k'] = best_k
     
-    return df_results, len(blocks)
+    return df_results, len(blocks), best_norm, best_k
 
 def cross_validate_blocks(X, y, feature_indices, classes, k_folds=10):
     kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
@@ -158,59 +217,60 @@ def cross_validate_blocks(X, y, feature_indices, classes, k_folds=10):
     with ThreadPoolExecutor(max_workers=min(multiprocessing.cpu_count(), 8)) as executor:
         all_results = list(executor.map(fold_worker, args_list))
 
-    # Separate results and block counts
+    # Separate results and metadata
     valid_results = []
     block_counts = []
-    for df, num_blocks in all_results:
+    learned_norms = []
+    learned_ks = []
+    
+    for df, num_blocks, norm, k in all_results:
         if not df.empty:
             valid_results.append(df)
             block_counts.append(num_blocks)
+            learned_norms.append(norm)
+            learned_ks.append(k)
     
     if not valid_results:
         print("No valid results found across all folds")
         return pd.DataFrame()
     
-    combined = pd.concat(valid_results, ignore_index=True)
-    avg_scores = combined.groupby(['norm', 'k'])['accuracy'].mean().reset_index()
+    # Calculate average accuracy across folds
+    fold_accuracies = []
+    for df in valid_results:
+        if not df.empty:
+            fold_accuracies.append(df.iloc[0]['accuracy'])
     
-    if not avg_scores.empty:
-        best_row = avg_scores.loc[avg_scores['accuracy'].idxmax()]
-        best_norm, best_k = best_row['norm'], best_row['k']
-
-        print("\nBest hyperparameter configuration across folds:")
-        print(best_row)
-
-        print("\nPer-fold results using best configuration:")
-        fold_accuracies = []
+    if fold_accuracies:
+        avg_accuracy = np.mean(fold_accuracies)
+        std_accuracy = np.std(fold_accuracies)
+        avg_blocks = np.mean(block_counts)
+        std_blocks = np.std(block_counts)
+        
+        print("\nCross-validation results:")
+        print(f"Average accuracy across all folds: {avg_accuracy:.4f} ± {std_accuracy:.4f}")
+        print(f"Average blocks per fold: {avg_blocks:.1f} ± {std_blocks:.1f}")
+        
+        print("\nPer-fold results:")
         fold_contained = []
         fold_knn = []
-        for i, (df, num_blocks) in enumerate(zip(valid_results, block_counts)):
-            match = df[(df['norm'] == best_norm) & (df['k'] == best_k)]
-            if not match.empty:
-                acc = match.iloc[0]['accuracy']
-                contained = match.iloc[0]['contained_count']
-                knn = match.iloc[0]['knn_count']
-                fold_accuracies.append(acc)
+        for i, (df, num_blocks, norm, k) in enumerate(zip(valid_results, block_counts, learned_norms, learned_ks)):
+            if not df.empty:
+                acc = df.iloc[0]['accuracy']
+                contained = df.iloc[0]['contained_count']
+                knn = df.iloc[0]['knn_count']
                 fold_contained.append(contained)
                 fold_knn.append(knn)
-                print(f"Fold {i+1}: accuracy = {acc:.4f}, blocks = {num_blocks}, contained = {contained}, k-NN = {knn}")
+                print(f"Fold {i+1}: accuracy = {acc:.4f}, blocks = {num_blocks}, contained = {contained}, k-NN = {knn}, norm = {norm}, k = {k}")
         
-        # Calculate and display average accuracy
-        if fold_accuracies:
-            avg_accuracy = np.mean(fold_accuracies)
-            std_accuracy = np.std(fold_accuracies)
-            avg_blocks = np.mean(block_counts)
-            std_blocks = np.std(block_counts)
+        if fold_contained:
             avg_contained = np.mean(fold_contained)
             std_contained = np.std(fold_contained)
             avg_knn = np.mean(fold_knn)
             std_knn = np.std(fold_knn)
-            print(f"\nAverage accuracy across all folds: {avg_accuracy:.4f} ± {std_accuracy:.4f}")
-            print(f"Average blocks per fold: {avg_blocks:.1f} ± {std_blocks:.1f}")
-            print(f"Average contained cases per fold: {avg_contained:.1f} ± {std_contained:.1f}")
+            print(f"\nAverage contained cases per fold: {avg_contained:.1f} ± {std_contained:.1f}")
             print(f"Average k-NN cases per fold: {avg_knn:.1f} ± {std_knn:.1f}")
 
-    return avg_scores
+    return pd.DataFrame({'fold_accuracies': fold_accuracies})
 
 def main():
     print("Loading Fisher Iris dataset...")
@@ -233,10 +293,6 @@ def main():
     print(f"Features: {len(feature_indices)}")
 
     print("\nRunning cross-validation...")
-    scores = cross_validate_blocks(X, y, feature_indices, classes)
-    # Removed the final results table output
-    # print("\nFinal results:")
-    # print(scores)
 
 if __name__ == "__main__":
     main()
