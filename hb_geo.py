@@ -74,6 +74,20 @@ def prune_and_merge_blocks(blocks):
             pruned.append(b)
     return pruned
 
+def deduplicate_blocks(blocks, tolerance=1e-6):
+    """Remove duplicate or nearly identical blocks based on bounds."""
+    unique = []
+    seen = set()
+
+    for b in blocks:
+        bounds = np.round(np.array(b['bounds']), decimals=6)
+        key = tuple(bounds.flatten())
+        if key not in seen:
+            seen.add(key)
+            unique.append(b)
+
+    return unique
+
 def distance_to_hyperblock(point, bounds, norm=2):
     projected = np.clip(point, bounds[:, 0], bounds[:, 1])
     return np.linalg.norm(point - projected, ord=norm)
@@ -87,7 +101,12 @@ def find_all_envelope_blocks(X, y, feature_indices, classes):
     with ThreadPoolExecutor(max_workers=min(multiprocessing.cpu_count(), 8)) as executor:
         for result in executor.map(compute_envelope_blocks_for_class, args_list):
             all_blocks.extend(result)
-    return prune_and_merge_blocks(all_blocks)
+    
+    # Apply pruning and merging, then deduplication
+    pruned_blocks = prune_and_merge_blocks(all_blocks)
+    deduplicated_blocks = deduplicate_blocks(pruned_blocks)
+    
+    return deduplicated_blocks
 
 def classify_with_hyperblocks(X, y, blocks, k_values=None):
     if not blocks:
