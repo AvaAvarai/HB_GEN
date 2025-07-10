@@ -1,9 +1,10 @@
 import pandas as pd
 import numpy as np
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.metrics import accuracy_score, confusion_matrix, silhouette_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
+from sklearn.cluster import KMeans
 from scipy.spatial.distance import cdist
 from concurrent.futures import ThreadPoolExecutor
 import multiprocessing
@@ -39,57 +40,144 @@ def compute_envelope_blocks_for_class(args):
 
     sorted_features = np.argsort(feature_importance)[::-1]
 
-    # Initialize bounds for the class
-    bounds = np.full((num_features, 2), [np.inf, -np.inf])
-    has_intersection = False
-
-    # First, always create a basic envelope for the class points
-    for p in class_points:
-        for i in range(num_features):
-            bounds[i, 0] = min(bounds[i, 0], p[i])
-            bounds[i, 1] = max(bounds[i, 1], p[i])
-
-    # If there are other points, try to find intersection patterns for refinement
-    if other_points.shape[0] > 0:
-        refined_bounds = np.full((num_features, 2), [np.inf, -np.inf])
+    # Cluster the class points to find natural groupings
+    
+    # Determine optimal number of clusters using silhouette analysis
+    max_clusters = min(5, class_points.shape[0] // 2)  # Limit to reasonable number
+    best_n_clusters = 1
+    best_silhouette = -1
+    
+    for n_clusters in range(1, max_clusters + 1):
+        if n_clusters == 1:
+            silhouette = 0  # Single cluster has no silhouette score
+        else:
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+            cluster_labels = kmeans.fit_predict(class_points)
+            if len(np.unique(cluster_labels)) > 1:
+                silhouette = silhouette_score(class_points, cluster_labels)
+            else:
+                silhouette = 0
         
-        # Wrap-around scanning: each feature sees its left and right neighbors
-        for i in range(len(sorted_features)):
-            left_idx = sorted_features[i - 1] if i > 0 else sorted_features[-1]
-            right_idx = sorted_features[i + 1] if i < len(sorted_features) - 1 else sorted_features[0]
-            curr_idx = sorted_features[i]
+        if silhouette > best_silhouette:
+            best_silhouette = silhouette
+            best_n_clusters = n_clusters
+    
+    # Generate hyperblocks for each cluster
+    if best_n_clusters == 1:
+        # Single cluster - create one hyperblock for the entire class
+        bounds = np.full((num_features, 2), [np.inf, -np.inf])
+        
+        # Create basic envelope for all class points
+        for p in class_points:
+            for i in range(num_features):
+                bounds[i, 0] = min(bounds[i, 0], p[i])
+                bounds[i, 1] = max(bounds[i, 1], p[i])
+        
+        # Try to refine with intersection patterns if other points exist
+        if other_points.shape[0] > 0:
+            refined_bounds = np.full((num_features, 2), [np.inf, -np.inf])
+            has_intersection = False
+            
+            # Wrap-around scanning: each feature sees its left and right neighbors
+            for i in range(len(sorted_features)):
+                left_idx = sorted_features[i - 1] if i > 0 else sorted_features[-1]
+                right_idx = sorted_features[i + 1] if i < len(sorted_features) - 1 else sorted_features[0]
+                curr_idx = sorted_features[i]
 
-            for p in class_points:
-                p_curr = p[curr_idx]
-                p_left = p[left_idx]
-                p_right = p[right_idx]
+                for p in class_points:
+                    p_curr = p[curr_idx]
+                    p_left = p[left_idx]
+                    p_right = p[right_idx]
 
-                for q in other_points:
-                    q_curr = q[curr_idx]
-                    q_left = q[left_idx]
-                    q_right = q[right_idx]
+                    for q in other_points:
+                        q_curr = q[curr_idx]
+                        q_left = q[left_idx]
+                        q_right = q[right_idx]
 
-                    # Check if there's an intersection pattern
-                    if ((p_curr - q_curr) * (p_left - q_left) < 0 or 
-                        (p_curr - q_curr) * (p_right - q_right) < 0):
-                        refined_bounds[curr_idx, 0] = min(refined_bounds[curr_idx, 0], p_curr)
-                        refined_bounds[curr_idx, 1] = max(refined_bounds[curr_idx, 1], p_curr)
-                        refined_bounds[left_idx, 0] = min(refined_bounds[left_idx, 0], p_left)
-                        refined_bounds[left_idx, 1] = max(refined_bounds[left_idx, 1], p_left)
-                        refined_bounds[right_idx, 0] = min(refined_bounds[right_idx, 0], p_right)
-                        refined_bounds[right_idx, 1] = max(refined_bounds[right_idx, 1], p_right)
-                        has_intersection = True
+                        # Check if there's an intersection pattern
+                        if ((p_curr - q_curr) * (p_left - q_left) < 0 or 
+                            (p_curr - q_curr) * (p_right - q_right) < 0):
+                            refined_bounds[curr_idx, 0] = min(refined_bounds[curr_idx, 0], p_curr)
+                            refined_bounds[curr_idx, 1] = max(refined_bounds[curr_idx, 1], p_curr)
+                            refined_bounds[left_idx, 0] = min(refined_bounds[left_idx, 0], p_left)
+                            refined_bounds[left_idx, 1] = max(refined_bounds[left_idx, 1], p_left)
+                            refined_bounds[right_idx, 0] = min(refined_bounds[right_idx, 0], p_right)
+                            refined_bounds[right_idx, 1] = max(refined_bounds[right_idx, 1], p_right)
+                            has_intersection = True
 
-        # If we found intersection patterns, use the refined bounds
-        if has_intersection:
-            bounds = refined_bounds
+            # If we found intersection patterns, use the refined bounds
+            if has_intersection:
+                bounds = refined_bounds
+        
+        blocks.append({
+            'class': c,
+            'bounds': bounds.tolist(),
+            'feature_order': sorted_features.tolist()
+        })
+        
+    else:
+        # Multiple clusters - create hyperblocks for each cluster
+        kmeans = KMeans(n_clusters=best_n_clusters, random_state=42, n_init=10)
+        cluster_labels = kmeans.fit_predict(class_points)
+        
+        for cluster_id in range(best_n_clusters):
+            cluster_mask = cluster_labels == cluster_id
+            cluster_points = class_points[cluster_mask]
+            
+            if cluster_points.shape[0] == 0:
+                continue
+                
+            # Create bounds for this cluster
+            bounds = np.full((num_features, 2), [np.inf, -np.inf])
+            
+            # Create envelope for cluster points
+            for p in cluster_points:
+                for i in range(num_features):
+                    bounds[i, 0] = min(bounds[i, 0], p[i])
+                    bounds[i, 1] = max(bounds[i, 1], p[i])
+            
+            # Try to refine with intersection patterns if other points exist
+            if other_points.shape[0] > 0:
+                refined_bounds = np.full((num_features, 2), [np.inf, -np.inf])
+                has_intersection = False
+                
+                # Wrap-around scanning for this cluster
+                for i in range(len(sorted_features)):
+                    left_idx = sorted_features[i - 1] if i > 0 else sorted_features[-1]
+                    right_idx = sorted_features[i + 1] if i < len(sorted_features) - 1 else sorted_features[0]
+                    curr_idx = sorted_features[i]
 
-    # Always create at least one block for the class
-    blocks.append({
-        'class': c,
-        'bounds': bounds.tolist(),
-        'feature_order': sorted_features.tolist()
-    })
+                    for p in cluster_points:
+                        p_curr = p[curr_idx]
+                        p_left = p[left_idx]
+                        p_right = p[right_idx]
+
+                        for q in other_points:
+                            q_curr = q[curr_idx]
+                            q_left = q[left_idx]
+                            q_right = q[right_idx]
+
+                            # Check if there's an intersection pattern
+                            if ((p_curr - q_curr) * (p_left - q_left) < 0 or 
+                                (p_curr - q_curr) * (p_right - q_right) < 0):
+                                refined_bounds[curr_idx, 0] = min(refined_bounds[curr_idx, 0], p_curr)
+                                refined_bounds[curr_idx, 1] = max(refined_bounds[curr_idx, 1], p_curr)
+                                refined_bounds[left_idx, 0] = min(refined_bounds[left_idx, 0], p_left)
+                                refined_bounds[left_idx, 1] = max(refined_bounds[left_idx, 1], p_left)
+                                refined_bounds[right_idx, 0] = min(refined_bounds[right_idx, 0], p_right)
+                                refined_bounds[right_idx, 1] = max(refined_bounds[right_idx, 1], p_right)
+                                has_intersection = True
+
+                # If we found intersection patterns, use the refined bounds
+                if has_intersection:
+                    bounds = refined_bounds
+            
+            blocks.append({
+                'class': c,
+                'bounds': bounds.tolist(),
+                'feature_order': sorted_features.tolist(),
+                'cluster_id': cluster_id
+            })
 
     return blocks
 
@@ -216,8 +304,8 @@ def learn_optimal_hyperparameters(X_train, y_train, blocks):
     for norm in [1, 2]:
         norm_name = f'L{norm}'
         
-        # Test k values from 1 to min(10, number of blocks)
-        max_k = min(10, len(blocks))
+        # Test k values from 1 to number of blocks
+        max_k = len(blocks)
         for k in range(1, max_k + 1):
             # Use training data to evaluate this combination
             predictions = []
