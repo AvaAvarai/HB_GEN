@@ -22,17 +22,17 @@ Achieve comparable performance with hyperblock models as to that of a Convolutio
   - Features: 121 (11×11 after cropping and 2×2 pooling)
   - Classes: 10 digits (0-9)
 
-- **MNIST by Class (784-D)**: Individual class datasets
-  - Training: `datasets/mnist_by_class/train/mnist_class_*_train.csv`
-  - Test: `datasets/mnist_by_class/test/mnist_class_*_test.csv`
-  - Features: 784 (28×28 original pixels)
-  - Classes: 10 separate files (0-9)
-
-- **MNIST (784-D)**: Top-level goal
+- **MNIST (784-D)**: Dimensionally reduced MNIST
   - Training: `datasets/mnist_dr_train.csv` (60,000 samples)
   - Test: `datasets/mnist_dr_test.csv` (10,000 samples)
   - Features: 784 (28×28 original pixels)
   - Classes: 10 digits (0-9)
+
+- **MNIST by Class (784-D)**: Individual class datasets for smaller files, top-level goal
+  - Training: `datasets/mnist_by_class/train/mnist_class_*_train.csv`
+  - Test: `datasets/mnist_by_class/test/mnist_class_*_test.csv`
+  - Features: 784 (28×28 original pixels)
+  - Classes: 10 separate files (0-9)
 
 ## References
 
