@@ -8,6 +8,7 @@ from sklearn.cluster import KMeans
 from scipy.spatial.distance import cdist
 from concurrent.futures import ThreadPoolExecutor
 import multiprocessing
+from tqdm import tqdm
 
 def compute_envelope_blocks_for_class(args):
     c, X, y, feature_indices = args
@@ -221,16 +222,18 @@ def distance_to_hyperblock(point, bounds, norm=2):
     projected = np.clip(point, bounds[:, 0], bounds[:, 1])
     return np.linalg.norm(point - projected, ord=norm)
 
-def find_all_envelope_blocks(X, y, feature_indices, classes):
+def find_all_envelope_blocks(X, y, feature_indices, classes, pbar=None):
     # Use encoded class numbers for block generation
     encoded_classes = np.unique(y)
     args_list = [(c, X, y, feature_indices) for c in encoded_classes]
     all_blocks = []
     
     # Use ThreadPoolExecutor to avoid multiprocessing issues
-    with ThreadPoolExecutor(max_workers=min(multiprocessing.cpu_count(), 8)) as executor:
+    with ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
         for result in executor.map(compute_envelope_blocks_for_class, args_list):
             all_blocks.extend(result)
+            if pbar:
+                pbar.update(1)
     
     # Apply pruning and merging, then deduplication
     pruned_blocks = prune_and_merge_blocks(all_blocks)
@@ -336,10 +339,10 @@ def learn_optimal_hyperparameters(X_train, y_train, blocks):
     return best_norm, best_k
 
 def fold_worker(args):
-    train_index, test_index, X, y, feature_indices, classes, fold_num = args
+    train_index, test_index, X, y, feature_indices, classes, fold_num, pbar = args
     X_train, X_test = X[train_index], X[test_index]
     y_train, y_test = y[train_index], y[test_index]
-    blocks = find_all_envelope_blocks(X_train, y_train, feature_indices, classes)
+    blocks = find_all_envelope_blocks(X_train, y_train, feature_indices, classes, pbar)
     
     # Learn optimal hyperparameters for this fold
     best_norm, best_k = learn_optimal_hyperparameters(X_train, y_train, blocks)
@@ -366,12 +369,18 @@ def cross_validate_blocks(X, y, feature_indices, classes, k_folds=10):
     kf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
     args_list = []
     
-    for fold_num, (train_index, test_index) in enumerate(kf.split(X, y)):
-        args_list.append((train_index, test_index, X, y, feature_indices, classes, fold_num))
+    # Calculate total number of tasks (folds * classes per fold)
+    encoded_classes = np.unique(y)
+    total_tasks = k_folds * len(encoded_classes)
+    
+    # Create single progress bar for all processing
+    with tqdm(total=total_tasks, desc="Processing hyperblocks", unit="class") as pbar:
+        for fold_num, (train_index, test_index) in enumerate(kf.split(X, y)):
+            args_list.append((train_index, test_index, X, y, feature_indices, classes, fold_num, pbar))
 
-    # Use ThreadPoolExecutor to avoid multiprocessing issues
-    with ThreadPoolExecutor(max_workers=min(multiprocessing.cpu_count(), 8)) as executor:
-        all_results = list(executor.map(fold_worker, args_list))
+        # Use ThreadPoolExecutor to avoid multiprocessing issues
+        with ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+            all_results = list(executor.map(fold_worker, args_list))
 
     # Separate results and metadata
     valid_results = []
@@ -489,7 +498,10 @@ def main():
         
         print("\nEvaluating on held-out test set...")
         # Train on full training set and evaluate on test set
-        blocks = find_all_envelope_blocks(X_train, y_train, feature_indices, y_encoder.classes_)
+        # Create progress bar for single evaluation
+        encoded_classes = np.unique(y_train)
+        with tqdm(total=len(encoded_classes), desc="Processing test set hyperblocks", unit="class") as pbar:
+            blocks = find_all_envelope_blocks(X_train, y_train, feature_indices, y_encoder.classes_, pbar)
         best_norm, best_k = learn_optimal_hyperparameters(X_train, y_train, blocks)
         
         df_test_results = classify_with_hyperblocks(X_test, y_test, blocks, k_values=[best_k])
