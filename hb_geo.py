@@ -189,6 +189,50 @@ def deduplicate_blocks(blocks, tolerance=1e-6):
             unique.append(b)
     return unique
 
+def save_hyperblock_bounds_to_csv(all_blocks_per_fold, classes, feature_names, k_folds):
+    """Save hyperblock bounds to CSV with class names and fold information."""
+    import os
+    from datetime import datetime
+    
+    # Create output directory if it doesn't exist
+    output_dir = "hyperblock_bounds"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Generate timestamp for unique filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{output_dir}/hyperblock_bounds_{timestamp}.csv"
+    
+    # Prepare data for CSV
+    csv_data = []
+    
+    for fold_num, blocks in enumerate(all_blocks_per_fold):
+        for block_idx, block in enumerate(blocks):
+            bounds = np.array(block['bounds'])
+            class_label = block['class']
+            class_name = classes[class_label]
+            
+            # Create one row per hyperblock
+            row = {
+                'fold': fold_num + 1,
+                'class_label': class_label,
+                'class_name': class_name
+            }
+            
+            # Add feature bounds as columns using actual feature names
+            for feature_idx, feature_name in enumerate(feature_names):
+                row[f"{feature_name}_lower"] = bounds[feature_idx, 0]
+                row[f"{feature_name}_upper"] = bounds[feature_idx, 1]
+            
+            csv_data.append(row)
+    
+    # Create DataFrame and save to CSV
+    df_bounds = pd.DataFrame(csv_data)
+    df_bounds.to_csv(filename, index=False)
+    
+    print(f"\nHyperblock bounds saved to: {filename}")
+    print(f"Total hyperblocks recorded: {len(csv_data)}")
+    print(f"Folds processed: {len(all_blocks_per_fold)}")
+
 def classify_batch(points, block_bounds, block_labels, k, norm):
     """Classify a batch of points using the hyperblocks and k-NN logic."""
     predictions = np.zeros(len(points), dtype=np.int32)
@@ -308,9 +352,9 @@ def fold_worker(args):
         df_results['num_blocks'] = len(blocks)
         df_results['learned_norm'] = best_norm
         df_results['learned_k'] = best_k
-    return df_results, len(blocks), best_norm, best_k, predictions, y_test
+    return df_results, len(blocks), best_norm, best_k, predictions, y_test, blocks
 
-def cross_validate_blocks(X, y, feature_indices, classes, k_folds=10):
+def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=10):
     kf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
     args_list = []
     encoded_classes = np.unique(y)
@@ -326,7 +370,8 @@ def cross_validate_blocks(X, y, feature_indices, classes, k_folds=10):
     learned_ks = []
     all_predictions = []
     all_true_labels = []
-    for df, num_blocks, norm, k, predictions, y_test in all_results:
+    all_blocks_per_fold = []  # Store blocks for each fold
+    for df, num_blocks, norm, k, predictions, y_test, blocks in all_results:
         if not df.empty:
             valid_results.append(df)
             block_counts.append(num_blocks)
@@ -334,6 +379,7 @@ def cross_validate_blocks(X, y, feature_indices, classes, k_folds=10):
             learned_ks.append(k)
             all_predictions.append(predictions)
             all_true_labels.append(y_test)
+            all_blocks_per_fold.append(blocks)
     if not valid_results:
         print("No valid results found across all folds")
         return pd.DataFrame()
@@ -349,7 +395,7 @@ def cross_validate_blocks(X, y, feature_indices, classes, k_folds=10):
         print("Per-fold results:")
         fold_contained = []
         fold_knn = []
-        for i, (df, num_blocks, norm, k, predictions, y_test) in enumerate(zip(valid_results, block_counts, learned_norms, learned_ks, all_predictions, all_true_labels)):
+        for i, (df, num_blocks, norm, k, predictions, y_test, blocks) in enumerate(zip(valid_results, block_counts, learned_norms, learned_ks, all_predictions, all_true_labels, all_blocks_per_fold)):
             if not df.empty:
                 acc = df.iloc[0]['accuracy']
                 contained = df.iloc[0]['contained_count']
@@ -375,6 +421,9 @@ def cross_validate_blocks(X, y, feature_indices, classes, k_folds=10):
             std_knn = np.std(fold_knn)
             print(f"Average contained cases per fold: {avg_contained:.1f} ± {std_contained:.1f}")
             print(f"Average k-NN cases per fold: {avg_knn:.1f} ± {std_knn:.1f}")
+    # Save hyperblock bounds to CSV
+    save_hyperblock_bounds_to_csv(all_blocks_per_fold, classes, features, k_folds)
+    
     return pd.DataFrame({'fold_accuracies': fold_accuracies})
 
 def main():
@@ -406,7 +455,7 @@ def main():
         print(f"Classes: {y_encoder.classes_}")
         print(f"Features: {len(feature_indices)}")
         print("\nRunning cross-validation on training data...")
-        scores = cross_validate_blocks(X_train, y_train, feature_indices, y_encoder.classes_)
+        scores = cross_validate_blocks(X_train, y_train, feature_indices, y_encoder.classes_, features)
         print("\nEvaluating on held-out test set...")
         encoded_classes = np.unique(y_train)
         with tqdm(total=len(encoded_classes), desc="Processing test set hyperblocks", unit="class") as pbar:
@@ -439,7 +488,7 @@ def main():
         print(f"Classes: {y_encoder.classes_}")
         print(f"Features: {len(feature_indices)}")
         print("\nRunning cross-validation...")
-        scores = cross_validate_blocks(X, y, feature_indices, y_encoder.classes_)
+        scores = cross_validate_blocks(X, y, feature_indices, y_encoder.classes_, features)
         print("\nFinal results:")
         print(scores)
 
