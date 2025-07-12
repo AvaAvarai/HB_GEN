@@ -208,8 +208,29 @@ def classify_batch(points, block_bounds, block_labels, k, norm):
         else:
             top_k_indices = np.argsort(dists)[:k]
             classes_k = [block_labels[idx] for idx in top_k_indices]
+            
+            # Fast Copeland's method for tie-breaking
             unique_classes, counts = np.unique(classes_k, return_counts=True)
-            predictions[i] = unique_classes[np.argmax(counts)]
+            if len(unique_classes) == 1:
+                predictions[i] = unique_classes[0]
+            else:
+                # Optimized Copeland calculation
+                copeland_scores = {}
+                for i_a, class_a in enumerate(unique_classes):
+                    score = 0
+                    count_a = counts[i_a]
+                    for i_b, class_b in enumerate(unique_classes):
+                        if i_a != i_b:
+                            count_b = counts[i_b]
+                            if count_a > count_b:
+                                score += 1
+                            elif count_a == count_b:
+                                score += 0.5
+                    copeland_scores[class_a] = score
+                
+                best_class = max(copeland_scores, key=copeland_scores.get)
+                predictions[i] = best_class
+            
             knn_count += 1
     return predictions, contained_count, knn_count
 
