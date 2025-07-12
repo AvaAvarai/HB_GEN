@@ -222,6 +222,7 @@ def compute_block_confidence_scores(blocks, X, y):
         
         # Calculate overlap score: points from other classes / total points
         total_points = len(block_points)
+        own_class_points = class_point_dict.get(block_class, 0)
         other_class_points = sum(count for class_label, count in class_point_dict.items() 
                                if class_label != block_class)
         
@@ -234,9 +235,108 @@ def compute_block_confidence_scores(blocks, X, y):
         if total_points < 3:  # Penalize blocks with very few points
             confidence_score *= 0.5
         
+        # Containment confidence: intersection size with own-class vs other-class points
+        containment_confidence = own_class_points / (own_class_points + other_class_points) if (own_class_points + other_class_points) > 0 else 0.0
+        
         block['confidence_score'] = confidence_score
+        block['containment_confidence'] = containment_confidence
         block['total_points'] = total_points
+        block['own_class_points'] = own_class_points
         block['other_class_points'] = other_class_points
+    
+    return blocks
+
+def shrink_dominant_blocks(blocks, X, y, epsilon=0.02):
+    """Shrink margins on dominant blocks to reduce overlap with other classes."""
+    if not blocks:
+        return blocks
+    
+    # Convert to numpy arrays for easier manipulation
+    block_bounds = [np.array(b['bounds']) for b in blocks]
+    block_classes = [b['class'] for b in blocks]
+    
+    # Calculate class dominance (number of blocks per class)
+    class_block_counts = {}
+    for class_label in block_classes:
+        class_block_counts[class_label] = class_block_counts.get(class_label, 0) + 1
+    
+    # Find dominant classes (classes with more blocks than average)
+    avg_blocks_per_class = len(blocks) / len(set(block_classes))
+    dominant_classes = {class_label for class_label, count in class_block_counts.items() 
+                       if count > avg_blocks_per_class}
+    
+    # Shrink margins for dominant blocks
+    for i, block in enumerate(blocks):
+        if block_classes[i] in dominant_classes:
+            bounds = block_bounds[i]
+            block_class = block_classes[i]
+            
+            # Find points that fall within this block
+            block_mask = np.ones(len(X), dtype=bool)
+            for dim in range(len(bounds)):
+                block_mask &= (X[:, dim] >= bounds[dim, 0]) & (X[:, dim] <= bounds[dim, 1])
+            
+            block_points = X[block_mask]
+            block_point_classes = y[block_mask]
+            
+            if len(block_points) == 0:
+                continue
+            
+            # Check if this block misclassifies other classes
+            other_class_points = block_point_classes[block_point_classes != block_class]
+            misclassification_ratio = len(other_class_points) / len(block_points)
+            
+            # If block misclassifies significantly, shrink its margins
+            if misclassification_ratio > 0.1:  # More than 10% misclassification
+                # Shrink bounds by epsilon in each dimension
+                for dim in range(len(bounds)):
+                    range_size = bounds[dim, 1] - bounds[dim, 0]
+                    shrink_amount = range_size * epsilon
+                    bounds[dim, 0] += shrink_amount
+                    bounds[dim, 1] -= shrink_amount
+                
+                # Update the block bounds
+                block['bounds'] = bounds.tolist()
+                block['shrunk'] = True
+                block['original_misclassification_ratio'] = misclassification_ratio
+    
+    return blocks
+
+def flag_misclassifying_blocks(blocks, X, y, threshold=0.1):
+    """Flag blocks that misclassify other classes above a threshold."""
+    if not blocks:
+        return blocks
+    
+    flagged_blocks = []
+    
+    for i, block in enumerate(blocks):
+        bounds = np.array(block['bounds'])
+        block_class = block['class']
+        
+        # Find points that fall within this block
+        block_mask = np.ones(len(X), dtype=bool)
+        for dim in range(len(bounds)):
+            block_mask &= (X[:, dim] >= bounds[dim, 0]) & (X[:, dim] <= bounds[dim, 1])
+        
+        block_points = X[block_mask]
+        block_point_classes = y[block_mask]
+        
+        if len(block_points) == 0:
+            continue
+        
+        # Calculate misclassification ratio
+        other_class_points = block_point_classes[block_point_classes != block_class]
+        misclassification_ratio = len(other_class_points) / len(block_points)
+        
+        # Flag blocks with high misclassification
+        if misclassification_ratio > threshold:
+            block['flagged'] = True
+            block['misclassification_ratio'] = misclassification_ratio
+            block['misclassified_points'] = len(other_class_points)
+            flagged_blocks.append(i)
+        else:
+            block['flagged'] = False
+            block['misclassification_ratio'] = misclassification_ratio
     
     return blocks
 
@@ -377,14 +477,18 @@ def classify_batch(points, block_bounds, block_labels, k, norm, blocks=None):
             else:
                 # Tie between different classes - use confidence scores if available
                 if blocks is not None:
-                    # Use confidence scores to break ties
+                    # Use containment confidence scores to break ties
                     class_confidence = {}
                     for class_label in unique_classes:
-                        # Find the highest confidence block for this class
+                        # Find the highest containment confidence block for this class
                         max_confidence = 0.0
                         for idx in contained_indices:
-                            if block_labels[idx] == class_label and 'confidence_score' in blocks[idx]:
-                                max_confidence = max(max_confidence, blocks[idx]['confidence_score'])
+                            if block_labels[idx] == class_label:
+                                # Use containment confidence if available, otherwise fall back to confidence_score
+                                if 'containment_confidence' in blocks[idx]:
+                                    max_confidence = max(max_confidence, blocks[idx]['containment_confidence'])
+                                elif 'confidence_score' in blocks[idx]:
+                                    max_confidence = max(max_confidence, blocks[idx]['confidence_score'])
                         class_confidence[class_label] = max_confidence
                     
                     # Choose class with highest confidence
@@ -499,7 +603,9 @@ def find_all_envelope_blocks(X, y, feature_indices, classes, pbar=None):
     pruned_blocks = prune_and_merge_blocks(all_blocks)
     deduplicated_blocks = deduplicate_blocks(pruned_blocks)
     scored_blocks = compute_block_confidence_scores(deduplicated_blocks, X, y)
-    return scored_blocks
+    flagged_blocks = flag_misclassifying_blocks(scored_blocks, X, y, threshold=0.1)
+    shrunk_blocks = shrink_dominant_blocks(flagged_blocks, X, y, epsilon=0.02)
+    return shrunk_blocks
 
 def fold_worker(args):
     train_index, test_index, X, y, feature_indices, classes, fold_num, pbar = args
