@@ -246,7 +246,7 @@ def compute_block_confidence_scores(blocks, X, y):
     
     return blocks
 
-def shrink_dominant_blocks(blocks, X, y, epsilon=0.02):
+def shrink_dominant_blocks(blocks, X, y, epsilon=0.1):
     """Shrink margins on dominant blocks to reduce overlap with other classes."""
     if not blocks:
         return blocks
@@ -491,9 +491,13 @@ def classify_batch(points, block_bounds, block_labels, k, norm, blocks=None):
                                     max_confidence = max(max_confidence, blocks[idx]['confidence_score'])
                         class_confidence[class_label] = max_confidence
                     
-                    # Choose class with highest confidence
-                    best_class = max(class_confidence, key=class_confidence.get)
-                    predictions[i] = best_class
+                    if not class_confidence or all(v == 0 for v in class_confidence.values()):
+                        # Fallback: choose class with most blocks containing point
+                        fallback_class = unique_classes[np.argmax(counts)]
+                        predictions[i] = fallback_class
+                    else:
+                        best_class = max(class_confidence, key=class_confidence.get)
+                        predictions[i] = best_class
                 else:
                     # Fallback to Copeland's method
                     copeland_scores = {}
@@ -604,7 +608,7 @@ def find_all_envelope_blocks(X, y, feature_indices, classes, pbar=None):
     deduplicated_blocks = deduplicate_blocks(pruned_blocks)
     scored_blocks = compute_block_confidence_scores(deduplicated_blocks, X, y)
     flagged_blocks = flag_misclassifying_blocks(scored_blocks, X, y, threshold=0.1)
-    shrunk_blocks = shrink_dominant_blocks(flagged_blocks, X, y, epsilon=0.02)
+    shrunk_blocks = shrink_dominant_blocks(flagged_blocks, X, y, epsilon=0.1)
     return shrunk_blocks
 
 def fold_worker(args):
