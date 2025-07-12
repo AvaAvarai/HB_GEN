@@ -189,6 +189,127 @@ def deduplicate_blocks(blocks, tolerance=1e-6):
             unique.append(b)
     return unique
 
+def compute_block_confidence_scores(blocks, X, y):
+    """Compute confidence scores for blocks based on overlap with other classes."""
+    if not blocks:
+        return blocks
+    
+    # Convert to numpy arrays for easier manipulation
+    block_bounds = [np.array(b['bounds']) for b in blocks]
+    block_classes = [b['class'] for b in blocks]
+    
+    # Calculate overlap scores for each block
+    for i, block in enumerate(blocks):
+        bounds = block_bounds[i]
+        block_class = block_classes[i]
+        
+        # Find points that fall within this block
+        block_mask = np.ones(len(X), dtype=bool)
+        for dim in range(len(bounds)):
+            block_mask &= (X[:, dim] >= bounds[dim, 0]) & (X[:, dim] <= bounds[dim, 1])
+        
+        block_points = X[block_mask]
+        block_point_classes = y[block_mask]
+        
+        if len(block_points) == 0:
+            # Empty block - low confidence
+            block['confidence_score'] = 0.0
+            continue
+        
+        # Count points of different classes within this block
+        unique_classes, class_counts = np.unique(block_point_classes, return_counts=True)
+        class_point_dict = dict(zip(unique_classes, class_counts))
+        
+        # Calculate overlap score: points from other classes / total points
+        total_points = len(block_points)
+        other_class_points = sum(count for class_label, count in class_point_dict.items() 
+                               if class_label != block_class)
+        
+        overlap_score = other_class_points / total_points if total_points > 0 else 1.0
+        
+        # Confidence score is inverse of overlap (lower overlap = higher confidence)
+        confidence_score = 1.0 - overlap_score
+        
+        # Additional penalty for blocks with very few points
+        if total_points < 3:  # Penalize blocks with very few points
+            confidence_score *= 0.5
+        
+        block['confidence_score'] = confidence_score
+        block['total_points'] = total_points
+        block['other_class_points'] = other_class_points
+    
+    return blocks
+
+def analyze_misclassifications(X_test, y_test, predictions, blocks, classes, features, fold_num):
+    """Analyze and print detailed information about misclassifications."""
+    misclassified_indices = np.where(y_test != predictions)[0]
+    
+    if len(misclassified_indices) == 0:
+        print(f"Fold {fold_num + 1}: No misclassifications!")
+        return
+    
+    print(f"\n=== DETAILED MISCLASSIFICATION ANALYSIS (Fold {fold_num + 1}) ===")
+    print(f"Total misclassifications: {len(misclassified_indices)} out of {len(y_test)} ({len(misclassified_indices)/len(y_test)*100:.1f}%)")
+    
+    # Get block information for analysis
+    block_bounds = [np.array(b['bounds']) for b in blocks]
+    block_labels = np.array([b['class'] for b in blocks])
+    
+    for idx in misclassified_indices:
+        true_class = y_test[idx]
+        pred_class = predictions[idx]
+        point = X_test[idx]
+        
+        print(f"\n--- Misclassified Point {idx} ---")
+        print(f"True class: {true_class} ({classes[true_class]})")
+        print(f"Predicted class: {pred_class} ({classes[pred_class]})")
+        print(f"Point features: {dict(zip(features, point))}")
+        
+        # Find distances to all blocks
+        distances = []
+        for i, bounds in enumerate(block_bounds):
+            dist = distance_to_hyperblock(point, bounds, norm=2)
+            distances.append((dist, i, block_labels[i]))
+        
+        # Sort by distance
+        distances.sort()
+        
+        print(f"Distance to nearest blocks:")
+        for i, (dist, block_idx, block_class) in enumerate(distances[:5]):  # Show top 5
+            class_name = classes[block_class]
+            print(f"  {i+1}. Block {block_idx} (class {block_class}: {class_name}): distance = {dist:.6f}")
+        
+        # Check if point is contained in any block
+        contained_in = []
+        for i, bounds in enumerate(block_bounds):
+            if distance_to_hyperblock(point, bounds, norm=2) == 0:
+                contained_in.append((i, block_labels[i]))
+        
+        if contained_in:
+            print(f"Point is contained in {len(contained_in)} block(s):")
+            for block_idx, block_class in contained_in:
+                print(f"  - Block {block_idx} (class {block_class}: {classes[block_class]})")
+        else:
+            print("Point is not contained in any block (using k-NN)")
+    
+    # Summary statistics
+    print(f"\n--- Misclassification Summary (Fold {fold_num + 1}) ---")
+    misclass_matrix = {}
+    for true_class in np.unique(y_test):
+        for pred_class in np.unique(y_test):
+            if true_class != pred_class:
+                count = np.sum((y_test == true_class) & (predictions == pred_class))
+                if count > 0:
+                    key = (true_class, pred_class)
+                    misclass_matrix[key] = count
+    
+    if misclass_matrix:
+        print("Misclassification patterns:")
+        for (true_class, pred_class), count in sorted(misclass_matrix.items()):
+            true_name = classes[true_class]
+            pred_name = classes[pred_class]
+            print(f"  {true_name} → {pred_name}: {count} cases")
+
 def save_hyperblock_bounds_to_csv(all_blocks_per_fold, classes, feature_names, k_folds):
     """Save hyperblock bounds to CSV with class names and fold information."""
     import os
@@ -233,7 +354,7 @@ def save_hyperblock_bounds_to_csv(all_blocks_per_fold, classes, feature_names, k
     print(f"Total hyperblocks recorded: {len(csv_data)}")
     print(f"Folds processed: {len(all_blocks_per_fold)}")
 
-def classify_batch(points, block_bounds, block_labels, k, norm):
+def classify_batch(points, block_bounds, block_labels, k, norm, blocks=None):
     """Classify a batch of points using the hyperblocks and k-NN logic."""
     predictions = np.zeros(len(points), dtype=np.int32)
     contained_count = 0
@@ -244,16 +365,58 @@ def classify_batch(points, block_bounds, block_labels, k, norm):
             all_dists[i, j] = distance_to_hyperblock(point, bounds, norm)
     for i in range(len(points)):
         dists = all_dists[i]
-        min_dist_idx = np.argmin(dists)
-        min_dist = dists[min_dist_idx]
+        min_dist = np.min(dists)
+        
         if min_dist == 0:
-            predictions[i] = block_labels[min_dist_idx]
+            # Point is contained in one or more blocks
+            contained_indices = np.where(dists == 0)[0]
+            contained_classes = [block_labels[idx] for idx in contained_indices]
+            unique_classes, counts = np.unique(contained_classes, return_counts=True)
+            if len(unique_classes) == 1:
+                predictions[i] = unique_classes[0]
+            else:
+                # Tie between different classes - use confidence scores if available
+                if blocks is not None:
+                    # Use confidence scores to break ties
+                    class_confidence = {}
+                    for class_label in unique_classes:
+                        # Find the highest confidence block for this class
+                        max_confidence = 0.0
+                        for idx in contained_indices:
+                            if block_labels[idx] == class_label and 'confidence_score' in blocks[idx]:
+                                max_confidence = max(max_confidence, blocks[idx]['confidence_score'])
+                        class_confidence[class_label] = max_confidence
+                    
+                    # Choose class with highest confidence
+                    best_class = max(class_confidence, key=class_confidence.get)
+                    predictions[i] = best_class
+                else:
+                    # Fallback to Copeland's method
+                    copeland_scores = {}
+                    for i_a, class_a in enumerate(unique_classes):
+                        score = 0
+                        count_a = counts[i_a]
+                        for i_b, class_b in enumerate(unique_classes):
+                            if i_a != i_b:
+                                count_b = counts[i_b]
+                                if count_a > count_b:
+                                    score += 1
+                                elif count_a == count_b:
+                                    score += 0.5
+                        copeland_scores[class_a] = score
+                    
+                    best_class = max(copeland_scores, key=copeland_scores.get)
+                    predictions[i] = best_class
             contained_count += 1
         else:
-            top_k_indices = np.argsort(dists)[:k]
-            classes_k = [block_labels[idx] for idx in top_k_indices]
+            # Point is not contained - use all blocks at minimum distance
+            # Find all blocks at minimum distance (handle ties)
+            min_dist_indices = np.where(dists == min_dist)[0]
             
-            # Fast Copeland's method for tie-breaking
+            # Use all blocks at minimum distance, regardless of k
+            classes_k = [block_labels[idx] for idx in min_dist_indices]
+            
+            # Use Copeland's method for tie-breaking
             unique_classes, counts = np.unique(classes_k, return_counts=True)
             if len(unique_classes) == 1:
                 predictions[i] = unique_classes[0]
@@ -291,7 +454,7 @@ def classify_with_hyperblocks(X, y, blocks, k_values=None):
             if k > len(blocks):
                 continue
             predictions, contained_count, knn_count = classify_batch(
-                X, block_bounds, block_labels, k, norm
+                X, block_bounds, block_labels, k, norm, blocks
             )
             acc = accuracy_score(y, predictions)
             results.append({
@@ -316,7 +479,7 @@ def learn_optimal_hyperparameters(X_train, y_train, blocks):
     for norm in [1, 2]:
         max_k = len(blocks)
         for k in range(1, max_k + 1):
-            predictions, _, _ = classify_batch(X_train, block_bounds, block_labels, k, norm)
+            predictions, _, _ = classify_batch(X_train, block_bounds, block_labels, k, norm, blocks)
             accuracy = np.mean(predictions == y_train)
             if accuracy > best_accuracy:
                 best_accuracy = accuracy
@@ -335,7 +498,8 @@ def find_all_envelope_blocks(X, y, feature_indices, classes, pbar=None):
                 pbar.update(1)
     pruned_blocks = prune_and_merge_blocks(all_blocks)
     deduplicated_blocks = deduplicate_blocks(pruned_blocks)
-    return deduplicated_blocks
+    scored_blocks = compute_block_confidence_scores(deduplicated_blocks, X, y)
+    return scored_blocks
 
 def fold_worker(args):
     train_index, test_index, X, y, feature_indices, classes, fold_num, pbar = args
@@ -352,7 +516,7 @@ def fold_worker(args):
         df_results['num_blocks'] = len(blocks)
         df_results['learned_norm'] = best_norm
         df_results['learned_k'] = best_k
-    return df_results, len(blocks), best_norm, best_k, predictions, y_test, blocks
+    return df_results, len(blocks), best_norm, best_k, predictions, y_test, X_test, blocks
 
 def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=10):
     kf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
@@ -370,8 +534,9 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=10):
     learned_ks = []
     all_predictions = []
     all_true_labels = []
+    all_test_data = []  # Store test data for each fold
     all_blocks_per_fold = []  # Store blocks for each fold
-    for df, num_blocks, norm, k, predictions, y_test, blocks in all_results:
+    for df, num_blocks, norm, k, predictions, y_test, X_test, blocks in all_results:
         if not df.empty:
             valid_results.append(df)
             block_counts.append(num_blocks)
@@ -379,6 +544,7 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=10):
             learned_ks.append(k)
             all_predictions.append(predictions)
             all_true_labels.append(y_test)
+            all_test_data.append(X_test)
             all_blocks_per_fold.append(blocks)
     if not valid_results:
         print("No valid results found across all folds")
@@ -395,7 +561,7 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=10):
         print("Per-fold results:")
         fold_contained = []
         fold_knn = []
-        for i, (df, num_blocks, norm, k, predictions, y_test, blocks) in enumerate(zip(valid_results, block_counts, learned_norms, learned_ks, all_predictions, all_true_labels, all_blocks_per_fold)):
+        for i, (df, num_blocks, norm, k, predictions, y_test, X_test, blocks) in enumerate(zip(valid_results, block_counts, learned_norms, learned_ks, all_predictions, all_true_labels, all_test_data, all_blocks_per_fold)):
             if not df.empty:
                 acc = df.iloc[0]['accuracy']
                 contained = df.iloc[0]['contained_count']
@@ -406,6 +572,9 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=10):
                 print(f"Confusion Matrix (Fold {i+1}):")
                 cm = confusion_matrix(y_test, predictions)
                 print(cm)
+                
+                # Add detailed misclassification analysis
+                analyze_misclassifications(X_test, y_test, predictions, blocks, classes, features, i)
                 print()
         avg_accuracy = np.mean(fold_accuracies)
         std_accuracy = np.std(fold_accuracies)
@@ -470,6 +639,10 @@ def main():
             print("Test Set Confusion Matrix:")
             cm = confusion_matrix(y_test, test_predictions)
             print(cm)
+            
+            # Add detailed misclassification analysis for test set
+            print("\n=== TEST SET MISCLASSIFICATION ANALYSIS ===")
+            analyze_misclassifications(X_test, y_test, test_predictions, blocks, y_encoder.classes_, features, -1)
         print("\nFinal results:")
         print(scores)
     else:
