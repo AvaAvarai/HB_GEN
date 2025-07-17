@@ -6,3 +6,8 @@
 
 - **Optimize silhouette distance metric on training data**  
   Experiment with different distance metrics (L1, L2) for silhouette score calculation and select the best-performing one during training.
+
+- **Shrink or merge hyperblocks to improve class separation**
+  - Iteratively shrink hyperblock edges to exclude training cases from opposing classes.
+  - Optionally, merge smaller hyperblocks into disjunctive units (e.g., multi-intervals for a single attribute).
+  - Initial experiments are inconclusive and have not shown clear benefits yet.
