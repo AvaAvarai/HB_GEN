@@ -705,6 +705,73 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=10):
     
     return pd.DataFrame({'fold_accuracies': fold_accuracies})
 
+def cross_validate_cascading_one_vs_all_blocks(X, y, feature_indices, classes, features, k_folds=10):
+    """Cascading one-vs-all hyperblock classification with cross-validation."""
+    from sklearn.metrics import accuracy_score, confusion_matrix
+    kf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
+    n_classes = len(classes)
+    fold_accuracies = []
+    all_predictions = []
+    all_true_labels = []
+    all_test_data = [] # Store test data for each fold
+    for fold_num, (train_index, test_index) in enumerate(kf.split(X, y)):
+        X_train, X_test = X[train_index], X[test_index]
+        y_train, y_test = y[train_index], y[test_index]
+        classifiers = []
+        for i in range(n_classes - 1):
+            # Only keep classes >= i
+            mask = y_train >= i
+            X_bin = X_train[mask]
+            y_bin = y_train[mask]
+            # Relabel: class i -> 1, all others -> 0
+            y_bin_binary = (y_bin == i).astype(int)
+            # Only proceed if both classes are present
+            if np.sum(y_bin_binary == 1) == 0 or np.sum(y_bin_binary == 0) == 0:
+                classifiers.append(None)
+                continue
+            blocks = find_all_envelope_blocks(X_bin, y_bin_binary, feature_indices, [0, 1])
+            best_norm, best_k = learn_optimal_hyperparameters(X_bin, y_bin_binary, blocks)
+            classifiers.append({
+                'blocks': blocks,
+                'best_norm': best_norm,
+                'best_k': best_k,
+                'class': i
+            })
+        # Prediction
+        preds = []
+        for x in X_test:
+            assigned = False
+            for i, clf in enumerate(classifiers):
+                if clf is None:
+                    continue
+                blocks = clf['blocks']
+                if not blocks:
+                    continue
+                block_bounds = [np.array(b['bounds']) for b in blocks]
+                block_labels = np.array([b['class'] for b in blocks])
+                # Use the best norm/k for this classifier
+                norm = 1 if clf['best_norm'] == 'L1' else 2
+                k = clf['best_k']
+                # Classify x (single sample)
+                pred, _, _ = classify_batch(
+                    np.array([x]), block_bounds, block_labels, k, norm, blocks
+                )
+                if pred[0] == 1:
+                    preds.append(i)
+                    assigned = True
+                    break
+            if not assigned:
+                preds.append(n_classes - 1)
+        acc = accuracy_score(y_test, preds)
+        fold_accuracies.append(acc)
+        all_predictions.extend(preds)
+        all_true_labels.extend(y_test)
+        all_test_data.append(X_test) # Store test data for this fold
+        print(f"Fold {fold_num+1}: accuracy = {acc:.4f}")
+        print("Confusion Matrix:")
+        print(confusion_matrix(y_test, preds))
+    return fold_accuracies, all_predictions, all_true_labels, all_test_data
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Hyperblock-based classification')
@@ -733,28 +800,20 @@ def main():
         print(f"Test set shape: {X_test.shape}")
         print(f"Classes: {y_encoder.classes_}")
         print(f"Features: {len(feature_indices)}")
-        print("\nRunning cross-validation on training data...")
-        scores = cross_validate_blocks(X_train, y_train, feature_indices, y_encoder.classes_, features)
-        print("\nEvaluating on held-out test set...")
-        encoded_classes = np.unique(y_train)
-        with tqdm(total=len(encoded_classes), desc="Processing test set hyperblocks", unit="class") as pbar:
-            blocks = find_all_envelope_blocks(X_train, y_train, feature_indices, y_encoder.classes_, pbar)
-        best_norm, best_k = learn_optimal_hyperparameters(X_train, y_train, blocks)
-        df_test_results = classify_with_hyperblocks(X_test, y_test, blocks, k_values=[best_k])
-        if not df_test_results.empty:
-            test_acc = df_test_results.iloc[0]['accuracy']
-            print(f"Test set accuracy: {test_acc:.4f}")
-            print(f"Test set predictions: {df_test_results.iloc[0]['preds']}")
-            test_predictions = df_test_results.iloc[0]['preds']
-            print("Test Set Confusion Matrix:")
-            cm = confusion_matrix(y_test, test_predictions)
-            print(cm)
-            
-            # Add detailed misclassification analysis for test set
-            print("\n=== TEST SET MISCLASSIFICATION ANALYSIS ===")
-            analyze_misclassifications(X_test, y_test, test_predictions, blocks, y_encoder.classes_, features, -1)
+        print("\nRunning cascading one-vs-all cross-validation...")
+        # Use cascading one-vs-all as the main pipeline
+        fold_accuracies, all_predictions, all_true_labels, all_test_data = cross_validate_cascading_one_vs_all_blocks(
+            X_train, y_train, feature_indices, y_encoder.classes_, features)
+        # Reporting
         print("\nFinal results:")
-        print(scores)
+        print(f"Fold accuracies: {fold_accuracies}")
+        avg_acc = np.mean(fold_accuracies)
+        std_acc = np.std(fold_accuracies)
+        print(f"Average accuracy: {avg_acc:.4f} ± {std_acc:.4f}")
+        from sklearn.metrics import confusion_matrix
+        print("Overall Confusion Matrix:")
+        print(confusion_matrix(all_true_labels, all_predictions))
+        # Optionally, save results to CSV or do misclassification analysis here
     else:
         print("Loading dataset...")
         df = pd.read_csv(args.dataset)
