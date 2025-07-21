@@ -706,10 +706,9 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=10):
     return pd.DataFrame({'fold_accuracies': fold_accuracies})
 
 def cross_validate_cascading_one_vs_all_blocks(X, y, feature_indices, classes, features, k_folds=10):
-    """Cascading one-vs-all hyperblock classification with cross-validation."""
+    """Cascading one-vs-all hyperblock classification with cross-validation. Robust to arbitrary class labels."""
     from sklearn.metrics import accuracy_score, confusion_matrix
     kf = StratifiedKFold(n_splits=k_folds, shuffle=True, random_state=42)
-    n_classes = len(classes)
     fold_accuracies = []
     all_predictions = []
     all_true_labels = []
@@ -717,14 +716,18 @@ def cross_validate_cascading_one_vs_all_blocks(X, y, feature_indices, classes, f
     for fold_num, (train_index, test_index) in enumerate(kf.split(X, y)):
         X_train, X_test = X[train_index], X[test_index]
         y_train, y_test = y[train_index], y[test_index]
+        class_values = np.sort(np.unique(y_train))
+        n_classes = len(class_values)
         classifiers = []
         for i in range(n_classes - 1):
-            # Only keep classes >= i
-            mask = y_train >= i
+            pos_class = class_values[i]
+            neg_classes = class_values[i+1:]
+            # Only keep classes in pos_class or neg_classes
+            mask = np.isin(y_train, np.concatenate(([pos_class], neg_classes)))
             X_bin = X_train[mask]
             y_bin = y_train[mask]
-            # Relabel: class i -> 1, all others -> 0
-            y_bin_binary = (y_bin == i).astype(int)
+            # Relabel: pos_class -> 1, all others -> 0
+            y_bin_binary = (y_bin == pos_class).astype(int)
             # Only proceed if both classes are present
             if np.sum(y_bin_binary == 1) == 0 or np.sum(y_bin_binary == 0) == 0:
                 classifiers.append(None)
@@ -735,13 +738,13 @@ def cross_validate_cascading_one_vs_all_blocks(X, y, feature_indices, classes, f
                 'blocks': blocks,
                 'best_norm': best_norm,
                 'best_k': best_k,
-                'class': i
+                'class_value': pos_class
             })
         # Prediction
         preds = []
         for x in X_test:
             assigned = False
-            for i, clf in enumerate(classifiers):
+            for clf in classifiers:
                 if clf is None:
                     continue
                 blocks = clf['blocks']
@@ -757,11 +760,11 @@ def cross_validate_cascading_one_vs_all_blocks(X, y, feature_indices, classes, f
                     np.array([x]), block_bounds, block_labels, k, norm, blocks
                 )
                 if pred[0] == 1:
-                    preds.append(i)
+                    preds.append(clf['class_value'])
                     assigned = True
                     break
             if not assigned:
-                preds.append(n_classes - 1)
+                preds.append(class_values[-1])
         acc = accuracy_score(y_test, preds)
         fold_accuracies.append(acc)
         all_predictions.extend(preds)
