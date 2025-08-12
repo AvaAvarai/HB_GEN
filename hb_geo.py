@@ -850,7 +850,7 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=DEFA
     with tqdm(total=total_tasks, desc="Processing hyperblocks", unit="class") as pbar:
         for fold_num, (train_index, test_index) in enumerate(kf.split(X, y)):
             args_list.append((train_index, test_index, X, y, feature_indices, classes, fold_num, pbar))
-        
+            
         with ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
             all_results = list(executor.map(fold_worker, args_list))
     
@@ -911,6 +911,9 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=DEFA
                 print(f"Confusion Matrix (Fold {i+1}):")
                 print(confusion_matrix(y_test, predictions))
                 print()
+                
+                # Analyze misclassifications for this fold
+                analyze_misclassifications(X_test, y_test, predictions, blocks, classes, features, i)
         
         # Summary statistics
         avg_accuracy = np.mean(fold_accuracies)
