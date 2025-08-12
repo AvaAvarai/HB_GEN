@@ -672,6 +672,64 @@ def deduplicate_blocks(blocks, tolerance=DEFAULT_DUPLICATE_TOLERANCE):
     return unique
 
 
+def remove_contained_blocks(blocks):
+    """
+    Remove blocks that are completely contained within other blocks of the same class.
+    
+    Args:
+        blocks (list): List of hyperblock dictionaries
+    
+    Returns:
+        list: Blocks with contained blocks removed
+    """
+    if not blocks:
+        return blocks
+    
+    block_bounds = [np.array(b['bounds']) for b in blocks]
+    block_classes = [b['class'] for b in blocks]
+    
+    # Group blocks by class
+    class_blocks = {}
+    for i, class_label in enumerate(block_classes):
+        if class_label not in class_blocks:
+            class_blocks[class_label] = []
+        class_blocks[class_label].append((i, block_bounds[i]))
+    
+    # Find contained blocks within each class
+    contained_indices = set()
+    
+    for class_label, class_block_list in class_blocks.items():
+        for i, (idx_i, bounds_i) in enumerate(class_block_list):
+            for j, (idx_j, bounds_j) in enumerate(class_block_list):
+                if i == j:
+                    continue
+                
+                # Check if bounds_i is contained within bounds_j
+                is_contained = True
+                for dim in range(len(bounds_i)):
+                    # bounds_i is contained if its lower bound >= bounds_j lower bound
+                    # and its upper bound <= bounds_j upper bound
+                    if bounds_i[dim, 0] < bounds_j[dim, 0] or bounds_i[dim, 1] > bounds_j[dim, 1]:
+                        is_contained = False
+                        break
+                
+                if is_contained:
+                    contained_indices.add(idx_i)
+                    break  # No need to check against other blocks for this one
+    
+    # Remove contained blocks
+    filtered_blocks = []
+    for i, block in enumerate(blocks):
+        if i not in contained_indices:
+            filtered_blocks.append(block)
+    
+    removed_count = len(blocks) - len(filtered_blocks)
+    if removed_count > 0:
+        print(f"Removed {removed_count} contained blocks")
+    
+    return filtered_blocks
+
+
 def compute_block_confidence_scores(blocks, X, y):
     """
     Compute confidence scores for blocks based on overlap with other classes.
@@ -1097,7 +1155,8 @@ def find_all_envelope_blocks(X, y, feature_indices, classes, pbar=None):
                                                   min_points_per_split=DEFAULT_MIN_POINTS_PER_SPLIT)
     pruned_blocks = prune_and_merge_blocks(refined_blocks)
     deduplicated_blocks = deduplicate_blocks(pruned_blocks)
-    scored_blocks = compute_block_confidence_scores(deduplicated_blocks, X, y)
+    contained_removed_blocks = remove_contained_blocks(deduplicated_blocks)
+    scored_blocks = compute_block_confidence_scores(contained_removed_blocks, X, y)
     flagged_blocks = flag_misclassifying_blocks(scored_blocks, X, y)
     shrunk_blocks = shrink_dominant_blocks(flagged_blocks, X, y)
     
