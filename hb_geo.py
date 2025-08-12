@@ -740,6 +740,7 @@ def compute_block_confidence_scores(blocks, X, y):
 def shrink_dominant_blocks(blocks, X, y, epsilon=DEFAULT_SHRINK_EPSILON):
     """
     Shrink margins on dominant blocks to reduce overlap with other classes.
+    Performs dimension-wise shrinking: only shrinks along dimensions that contain other-class points.
     
     Args:
         blocks (list): List of hyperblock dictionaries
@@ -783,20 +784,42 @@ def shrink_dominant_blocks(blocks, X, y, epsilon=DEFAULT_SHRINK_EPSILON):
                 continue
             
             # Check misclassification ratio
-            other_class_points = block_point_classes[block_point_classes != block_class]
+            other_class_mask = block_point_classes != block_class
+            other_class_points = block_points[other_class_mask]
             misclassification_ratio = len(other_class_points) / len(block_points)
             
             # Shrink if misclassification is high
             if misclassification_ratio > DEFAULT_MISCLASSIFICATION_THRESHOLD:
-                for dim in range(len(bounds)):
-                    range_size = bounds[dim, 1] - bounds[dim, 0]
-                    shrink_amount = range_size * epsilon
-                    bounds[dim, 0] += shrink_amount
-                    bounds[dim, 1] -= shrink_amount
+                # Analyze each dimension to see if it contains other-class points
+                dimensions_to_shrink = []
                 
-                block['bounds'] = bounds.tolist()
-                block['shrunk'] = True
-                block['original_misclassification_ratio'] = misclassification_ratio
+                for dim in range(len(bounds)):
+                    # Check if this dimension contains other-class points
+                    dim_values = block_points[:, dim]
+                    other_class_dim_values = other_class_points[:, dim]
+                    
+                    # Check if other-class points span a significant range in this dimension
+                    if len(other_class_dim_values) > 0:
+                        other_class_range = np.max(other_class_dim_values) - np.min(other_class_dim_values)
+                        total_range = bounds[dim, 1] - bounds[dim, 0]
+                        
+                        # Shrink if other-class points occupy a significant portion of this dimension
+                        if other_class_range > 0.1 * total_range:  # 10% threshold
+                            dimensions_to_shrink.append(dim)
+                
+                # Shrink only the problematic dimensions
+                if dimensions_to_shrink:
+                    for dim in dimensions_to_shrink:
+                        range_size = bounds[dim, 1] - bounds[dim, 0]
+                        shrink_amount = range_size * epsilon
+                        bounds[dim, 0] += shrink_amount
+                        bounds[dim, 1] -= shrink_amount
+                    
+                    block['bounds'] = bounds.tolist()
+                    block['shrunk'] = True
+                    block['original_misclassification_ratio'] = misclassification_ratio
+                    block['shrunk_dimensions'] = dimensions_to_shrink
+                    block['total_dimensions'] = len(bounds)
     
     return blocks
 
