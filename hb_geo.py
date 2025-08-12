@@ -1225,7 +1225,7 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=DEFA
                 print()
                 
                 # Analyze misclassifications for this fold
-                analyze_misclassifications(X_test, y_test, predictions, blocks, classes, features, i)
+                analyze_misclassifications(X_test, y_test, predictions, blocks, classes, features, i, learned_norm=norm)
         
         # Summary statistics
         avg_accuracy = np.mean(fold_accuracies)
@@ -1305,7 +1305,7 @@ def save_hyperblock_bounds_to_csv(all_blocks_per_fold, classes, feature_names, k
     print(f"Folds processed: {len(all_blocks_per_fold)}")
 
 
-def analyze_misclassifications(X_test, y_test, predictions, blocks, classes, features, fold_num):
+def analyze_misclassifications(X_test, y_test, predictions, blocks, classes, features, fold_num, learned_norm='L2'):
     """
     Analyze and print detailed information about misclassifications.
     
@@ -1318,6 +1318,10 @@ def analyze_misclassifications(X_test, y_test, predictions, blocks, classes, fea
         features (list): Feature names
         fold_num (int): Fold number
     """
+    def _to_norm(n):
+        return 1 if n=='L1' else (2 if n=='L2' else 'inf')
+    use_norm = _to_norm(learned_norm)
+
     misclassified_indices = np.where(y_test != predictions)[0]
     
     if len(misclassified_indices) == 0:
@@ -1345,7 +1349,7 @@ def analyze_misclassifications(X_test, y_test, predictions, blocks, classes, fea
         # Find distances to all blocks
         distances = []
         for i, bounds in enumerate(block_bounds):
-            dist = distance_to_hyperblock(point, bounds, norm=2)
+            dist = distance_to_hyperblock(point, bounds, norm=use_norm)
             distances.append((dist, i, block_labels[i]))
         
         # Sort by distance
@@ -1359,7 +1363,7 @@ def analyze_misclassifications(X_test, y_test, predictions, blocks, classes, fea
         # Check if point is contained in any block
         contained_in = []
         for i, bounds in enumerate(block_bounds):
-            if distance_to_hyperblock(point, bounds, norm=2) == 0:
+            if distance_to_hyperblock(point, bounds, norm=use_norm) == 0:
                 contained_in.append((i, block_labels[i]))
         
         if contained_in:
