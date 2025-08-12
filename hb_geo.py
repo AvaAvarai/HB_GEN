@@ -54,16 +54,25 @@ def distance_to_hyperblock(point, bounds, norm=2):
     Args:
         point (np.ndarray): Point coordinates
         bounds (np.ndarray): Hyperblock bounds as (n_features, 2) array [min, max]
-        norm (int): Distance norm (1 for L1, 2 for L2)
+        norm (int): Distance norm (1 for L1, 2 for L2, 'inf' for L∞)
     
     Returns:
         float: Distance from point to hyperblock
+        
+    Note:
+        L∞ (Chebyshev) distance is particularly natural for axis-aligned boxes as it
+        equals the maximum componentwise violation, reducing "almost contained" ties
+        that L1 distance tends to favor.
     """
     projected = np.clip(point, bounds[:, 0], bounds[:, 1])
     diff = point - projected
     
     if norm == 1:
         return np.sum(np.abs(diff))
+    elif norm == 2:
+        return np.sqrt(np.sum(diff * diff))
+    elif norm == 'inf' or norm == float('inf'):
+        return np.max(np.abs(diff))
     else:
         return np.sqrt(np.sum(diff * diff))
 
@@ -973,7 +982,7 @@ def classify_with_hyperblocks(X, y, blocks, k_values=None):
     block_labels = np.array([b['class'] for b in blocks])
     results = []
     
-    for norm in [1, 2]:
+    for norm in [1, 2, 'inf']:
         for k in k_values:
             if k > len(blocks):
                 continue
@@ -984,7 +993,7 @@ def classify_with_hyperblocks(X, y, blocks, k_values=None):
             acc = accuracy_score(y, predictions)
             
             results.append({
-                'norm': f'L{norm}',
+                'norm': f'L{norm}' if norm != 'inf' else 'L∞',
                 'k': k,
                 'accuracy': acc,
                 'preds': predictions.tolist(),
@@ -1017,7 +1026,7 @@ def learn_optimal_hyperparameters(X_train, y_train, blocks):
     block_bounds = [np.array(b['bounds']) for b in blocks]
     block_labels = np.array([b['class'] for b in blocks])
     
-    for norm in [1, 2]:
+    for norm in [1, 2, 'inf']:
         max_k = len(blocks)
         for k in range(1, max_k + 1):
             predictions, _, _ = classify_batch(X_train, block_bounds, block_labels, k, norm, blocks)
@@ -1025,7 +1034,7 @@ def learn_optimal_hyperparameters(X_train, y_train, blocks):
             
             if accuracy > best_accuracy:
                 best_accuracy = accuracy
-                best_norm = f'L{norm}'
+                best_norm = f'L{norm}' if norm != 'inf' else 'L∞'
                 best_k = k
     
     return best_norm, best_k
