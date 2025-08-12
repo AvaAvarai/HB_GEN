@@ -40,6 +40,8 @@ DEFAULT_MAX_CLUSTERS = 5
 DEFAULT_MIN_POINTS_FOR_PENALTY = 3
 DEFAULT_K_FOLDS = 10
 DEFAULT_RANDOM_STATE = 42
+DEFAULT_MAX_SPLITS = 3
+DEFAULT_MIN_POINTS_PER_SPLIT = 2
 
 # =============================================================================
 # CORE GEOMETRIC FUNCTIONS
@@ -294,6 +296,281 @@ def compute_envelope_blocks_for_class(args):
 # =============================================================================
 # HYPERBLOCK POST-PROCESSING
 # =============================================================================
+
+def check_block_purity_and_refine(blocks, X, y, max_splits=3, min_points_per_split=2):
+    """
+    Check if blocks contain opposite-class points and refine them until pure.
+    
+    Args:
+        blocks (list): List of hyperblock dictionaries
+        X (np.ndarray): Feature matrix
+        y (np.ndarray): Target labels
+        max_splits (int): Maximum number of splits per block
+        min_points_per_split (int): Minimum points required for a split
+    
+    Returns:
+        list: Refined blocks that are pure (contain only target class points)
+    """
+    if not blocks:
+        return blocks
+    
+    refined_blocks = []
+    total_original_blocks = len(blocks)
+    blocks_refined = 0
+    
+    for block in blocks:
+        bounds = np.array(block['bounds'])
+        block_class = block['class']
+        
+        # Find all points within this block
+        block_mask = np.ones(len(X), dtype=bool)
+        for dim in range(len(bounds)):
+            block_mask &= (X[:, dim] >= bounds[dim, 0]) & (X[:, dim] <= bounds[dim, 1])
+        
+        block_points = X[block_mask]
+        block_point_classes = y[block_mask]
+        
+        if len(block_points) == 0:
+            # Empty block - skip
+            continue
+        
+        # Check if block is pure (contains only target class points)
+        other_class_mask = block_point_classes != block_class
+        if not np.any(other_class_mask):
+            # Block is pure - keep as is
+            refined_blocks.append(block)
+            continue
+        
+        # Block contains opposite-class points - need to refine
+        blocks_refined += 1
+        refined_sub_blocks = _split_block_until_pure(
+            block, block_points, block_point_classes, X, y, 
+            max_splits, min_points_per_split
+        )
+        refined_blocks.extend(refined_sub_blocks)
+    
+    if blocks_refined > 0:
+        print(f"Purity refinement: {blocks_refined}/{total_original_blocks} blocks refined "
+              f"({len(refined_blocks)} total blocks after refinement)")
+    
+    return refined_blocks
+
+
+def _split_block_until_pure(block, block_points, block_point_classes, X, y, 
+                           max_splits, min_points_per_split):
+    """
+    Recursively split a block until it's pure or max splits reached.
+    
+    Args:
+        block (dict): Original block dictionary
+        block_points (np.ndarray): Points within the block
+        block_point_classes (np.ndarray): Classes of points within the block
+        X (np.ndarray): Full feature matrix
+        y (np.ndarray): Full target labels
+        max_splits (int): Maximum number of splits
+        min_points_per_split (int): Minimum points required for a split
+    
+    Returns:
+        list: List of pure sub-blocks
+    """
+    block_class = block['class']
+    bounds = np.array(block['bounds'])
+    
+    # Check if block is pure
+    other_class_mask = block_point_classes != block_class
+    if not np.any(other_class_mask):
+        return [block]
+    
+    # Check if we've reached max splits or too few points
+    if max_splits <= 0 or len(block_points) < min_points_per_split * 2:
+        # Can't split further - try shrinking instead
+        return _shrink_block_to_purity(block, block_points, block_point_classes, X, y)
+    
+    # Find the best feature to split on
+    best_feature, best_split_value = _find_best_split_feature(
+        block_points, block_point_classes, block_class, bounds
+    )
+    
+    if best_feature is None:
+        # No good split found - try shrinking
+        return _shrink_block_to_purity(block, block_points, block_point_classes, X, y)
+    
+    # Log the split decision
+    other_class_count = np.sum(block_point_classes != block_class)
+    target_class_count = np.sum(block_point_classes == block_class)
+    print(f"  Splitting block (class {block_class}): {target_class_count} target, {other_class_count} other points")
+    
+    # Create two sub-blocks
+    sub_blocks = []
+    
+    # Left sub-block (feature <= split_value)
+    left_bounds = bounds.copy()
+    left_bounds[best_feature, 1] = best_split_value
+    
+    left_mask = block_points[:, best_feature] <= best_split_value
+    left_points = block_points[left_mask]
+    left_classes = block_point_classes[left_mask]
+    
+    if len(left_points) >= min_points_per_split:
+        left_block = block.copy()
+        left_block['bounds'] = left_bounds.tolist()
+        left_block['split_feature'] = best_feature
+        left_block['split_value'] = best_split_value
+        left_block['split_direction'] = 'left'
+        
+        left_sub_blocks = _split_block_until_pure(
+            left_block, left_points, left_classes, X, y, 
+            max_splits - 1, min_points_per_split
+        )
+        sub_blocks.extend(left_sub_blocks)
+    
+    # Right sub-block (feature > split_value)
+    right_bounds = bounds.copy()
+    right_bounds[best_feature, 0] = best_split_value
+    
+    right_mask = block_points[:, best_feature] > best_split_value
+    right_points = block_points[right_mask]
+    right_classes = block_point_classes[right_mask]
+    
+    if len(right_points) >= min_points_per_split:
+        right_block = block.copy()
+        right_block['bounds'] = right_bounds.tolist()
+        right_block['split_feature'] = best_feature
+        right_block['split_value'] = best_split_value
+        right_block['split_direction'] = 'right'
+        
+        right_sub_blocks = _split_block_until_pure(
+            right_block, right_points, right_classes, X, y, 
+            max_splits - 1, min_points_per_split
+        )
+        sub_blocks.extend(right_sub_blocks)
+    
+    return sub_blocks
+
+
+def _find_best_split_feature(block_points, block_point_classes, block_class, bounds):
+    """
+    Find the best feature and split value to separate target class from others.
+    
+    Args:
+        block_points (np.ndarray): Points within the block
+        block_point_classes (np.ndarray): Classes of points within the block
+        block_class (int): Target class
+        bounds (np.ndarray): Current block bounds
+    
+    Returns:
+        tuple: (best_feature, best_split_value) or (None, None) if no good split
+    """
+    num_features = block_points.shape[1]
+    best_feature = None
+    best_split_value = None
+    best_purity_gain = -1
+    
+    target_mask = block_point_classes == block_class
+    other_mask = block_point_classes != block_class
+    
+    if not np.any(target_mask) or not np.any(other_mask):
+        return None, None
+    
+    for feature in range(num_features):
+        feature_values = block_points[:, feature]
+        target_values = feature_values[target_mask]
+        other_values = feature_values[other_mask]
+        
+        if len(target_values) == 0 or len(other_values) == 0:
+            continue
+        
+        # Find potential split points
+        all_values = np.concatenate([target_values, other_values])
+        unique_values = np.unique(all_values)
+        
+        if len(unique_values) < 2:
+            continue
+        
+        # Sort values and try midpoints as split points
+        sorted_values = np.sort(unique_values)
+        split_candidates = (sorted_values[:-1] + sorted_values[1:]) / 2
+        
+        for split_value in split_candidates:
+            # Skip if split is outside current bounds
+            if split_value <= bounds[feature, 0] or split_value >= bounds[feature, 1]:
+                continue
+            
+            # Calculate purity gain
+            left_mask = feature_values <= split_value
+            right_mask = feature_values > split_value
+            
+            if not np.any(left_mask) or not np.any(right_mask):
+                continue
+            
+            left_target = np.sum(target_mask & left_mask)
+            left_other = np.sum(other_mask & left_mask)
+            right_target = np.sum(target_mask & right_mask)
+            right_other = np.sum(other_mask & right_mask)
+            
+            # Calculate purity for each side
+            left_purity = left_target / (left_target + left_other) if (left_target + left_other) > 0 else 0
+            right_purity = right_target / (right_target + right_other) if (right_target + right_other) > 0 else 0
+            
+            # Overall purity gain (weighted average)
+            left_weight = (left_target + left_other) / len(block_points)
+            right_weight = (right_target + right_other) / len(block_points)
+            weighted_purity = left_weight * left_purity + right_weight * right_purity
+            
+            if weighted_purity > best_purity_gain:
+                best_purity_gain = weighted_purity
+                best_feature = feature
+                best_split_value = split_value
+    
+    return best_feature, best_split_value
+
+
+def _shrink_block_to_purity(block, block_points, block_point_classes, X, y):
+    """
+    Shrink block bounds to exclude opposite-class points.
+    
+    Args:
+        block (dict): Block dictionary
+        block_points (np.ndarray): Points within the block
+        block_point_classes (np.ndarray): Classes of points within the block
+        X (np.ndarray): Full feature matrix
+        y (np.ndarray): Full target labels
+    
+    Returns:
+        list: List containing the shrunk block (if any points remain)
+    """
+    block_class = block['class']
+    bounds = np.array(block['bounds'])
+    
+    # Find target class points
+    target_mask = block_point_classes == block_class
+    target_points = block_points[target_mask]
+    
+    if len(target_points) == 0:
+        return []  # No target class points - discard block
+    
+    # Calculate new bounds based only on target class points
+    new_bounds = bounds_calculation(target_points, bounds.shape[0])
+    
+    # Check if new bounds are significantly different
+    bounds_diff = np.sum(np.abs(new_bounds - bounds))
+    if bounds_diff < 1e-6:
+        # No significant change - return original block
+        return [block]
+    
+    # Create shrunk block
+    shrunk_block = block.copy()
+    shrunk_block['bounds'] = new_bounds.tolist()
+    shrunk_block['shrunk_for_purity'] = True
+    shrunk_block['original_bounds'] = bounds.tolist()
+    
+    # Log the shrinking
+    other_class_count = np.sum(block_point_classes != block_class)
+    target_class_count = np.sum(block_point_classes == block_class)
+    print(f"  Shrunk block (class {block_class}): {target_class_count} target, {other_class_count} other points")
+    
+    return [shrunk_block]
+
 
 def prune_blocks(blocks_bounds, blocks_classes, volume_threshold=DEFAULT_VOLUME_THRESHOLD):
     """
@@ -783,7 +1060,10 @@ def find_all_envelope_blocks(X, y, feature_indices, classes, pbar=None):
                 pbar.update(1)
     
     # Post-process blocks
-    pruned_blocks = prune_and_merge_blocks(all_blocks)
+    refined_blocks = check_block_purity_and_refine(all_blocks, X, y, 
+                                                  max_splits=DEFAULT_MAX_SPLITS, 
+                                                  min_points_per_split=DEFAULT_MIN_POINTS_PER_SPLIT)
+    pruned_blocks = prune_and_merge_blocks(refined_blocks)
     deduplicated_blocks = deduplicate_blocks(pruned_blocks)
     scored_blocks = compute_block_confidence_scores(deduplicated_blocks, X, y)
     flagged_blocks = flag_misclassifying_blocks(scored_blocks, X, y)
