@@ -198,7 +198,7 @@ def find_optimal_clusters(class_points, max_clusters=None):
         if n_clusters == 1:
             silhouette = 0
         else:
-            kmeans = KMeans(n_clusters=n_clusters, random_state=DEFAULT_RANDOM_STATE, n_init=10)
+            kmeans = KMeans(n_clusters=n_clusters, random_state=DEFAULT_RANDOM_STATE, n_init=1000)
             cluster_labels = kmeans.fit_predict(class_points)
             
             if len(np.unique(cluster_labels)) > 1:
@@ -262,7 +262,7 @@ def compute_envelope_blocks_for_class(args):
         })
     else:
         # Multiple clusters case
-        kmeans = KMeans(n_clusters=best_n_clusters, random_state=DEFAULT_RANDOM_STATE, n_init=10)
+        kmeans = KMeans(n_clusters=best_n_clusters, random_state=DEFAULT_RANDOM_STATE, n_init=1000)
         cluster_labels = kmeans.fit_predict(class_points)
         
         for cluster_id in range(best_n_clusters):
