@@ -36,7 +36,6 @@ DEFAULT_VOLUME_THRESHOLD = 1e-10
 DEFAULT_DUPLICATE_TOLERANCE = 1e-6
 DEFAULT_MISCLASSIFICATION_THRESHOLD = 0.1
 DEFAULT_SHRINK_EPSILON = 0.1
-DEFAULT_MAX_CLUSTERS = 5
 DEFAULT_MIN_POINTS_FOR_PENALTY = 3
 DEFAULT_K_FOLDS = 10
 DEFAULT_RANDOM_STATE = 42
@@ -190,36 +189,74 @@ def compute_feature_importance(X, y, class_label):
 
 def find_optimal_clusters(class_points, max_clusters=None):
     """
-    Find optimal number of clusters using silhouette analysis.
+    Find optimal number of clusters by generating clusters until they are no longer 
+    unique, large, or useful.
     
     Args:
         class_points (np.ndarray): Points from the target class
-        max_clusters (int): Maximum number of clusters to consider
+        max_clusters (int): Maximum number of clusters to consider (optional)
     
     Returns:
         int: Optimal number of clusters
     """
+    if len(class_points) < 2:
+        return 1
+    
+    # If max_clusters is specified, use it; otherwise, start with a reasonable number
+    # and let the algorithm determine when to stop
     if max_clusters is None:
-        max_clusters = min(DEFAULT_MAX_CLUSTERS, class_points.shape[0] // 2)
+        max_clusters = len(class_points) // 2  # Start with half the points as potential clusters
     
     best_n_clusters = 1
     best_silhouette = -1
+    consecutive_declining = 0
+    max_consecutive_declining = 3  # Stop after 3 consecutive declining scores
     
     for n_clusters in range(1, max_clusters + 1):
         if n_clusters == 1:
             silhouette = 0
         else:
-            kmeans = KMeans(n_clusters=n_clusters, random_state=DEFAULT_RANDOM_STATE, n_init=1000)
-            cluster_labels = kmeans.fit_predict(class_points)
-            
-            if len(np.unique(cluster_labels)) > 1:
-                silhouette = silhouette_score(class_points, cluster_labels)
-            else:
-                silhouette = 0
+            try:
+                kmeans = KMeans(n_clusters=n_clusters, random_state=DEFAULT_RANDOM_STATE, n_init=1000)
+                cluster_labels = kmeans.fit_predict(class_points)
+                
+                # Check if clusters are unique and large enough
+                unique_labels, label_counts = np.unique(cluster_labels, return_counts=True)
+                
+                # Stop if we have too many clusters or clusters are too small
+                if len(unique_labels) < n_clusters or np.any(label_counts < 2):
+                    break
+                
+                # Calculate silhouette score
+                if len(unique_labels) > 1:
+                    silhouette = silhouette_score(class_points, cluster_labels)
+                else:
+                    silhouette = 0
+                    
+            except Exception:
+                # If clustering fails, stop here
+                break
         
+        # Check if silhouette is improving
         if silhouette > best_silhouette:
             best_silhouette = silhouette
             best_n_clusters = n_clusters
+            consecutive_declining = 0
+        else:
+            consecutive_declining += 1
+            # If we've had too many consecutive declining scores, stop
+            if consecutive_declining >= max_consecutive_declining:
+                break
+        
+        # Additional stopping criteria
+        if n_clusters > 1:
+            # Stop if silhouette is very low (clusters are not well-separated)
+            if silhouette < 0.1:
+                break
+            
+            # Stop if we're creating too many tiny clusters
+            if n_clusters > len(class_points) // 3:
+                break
     
     return best_n_clusters
 
@@ -252,8 +289,8 @@ def compute_envelope_blocks_for_class(args):
     feature_importance = compute_feature_importance(X, y, class_label)
     sorted_features = np.argsort(feature_importance)[::-1]
     
-    # Find optimal number of clusters
-    best_n_clusters = find_optimal_clusters(class_points)
+    # Find optimal number of clusters - let algorithm determine when to stop
+    best_n_clusters = find_optimal_clusters(class_points, max_clusters=None)
     
     if best_n_clusters == 1:
         # Single cluster case
@@ -930,12 +967,78 @@ def flag_misclassifying_blocks(blocks, X, y, threshold=DEFAULT_MISCLASSIFICATION
 
 
 # =============================================================================
+# TIE BREAKER FUNCTIONS
+# =============================================================================
+
+def calculate_hyperblock_density(block):
+    """
+    Calculate the density of a hyperblock as point count / volume.
+    
+    Args:
+        block (dict): Hyperblock dictionary with bounds and total_points
+    
+    Returns:
+        float: Density (points per unit volume), or 0 if volume is 0
+    """
+    bounds = np.array(block['bounds'])
+    
+    # Calculate volume
+    volume = np.prod(bounds[:, 1] - bounds[:, 0])
+    
+    # Get point count
+    point_count = block.get('total_points', 0)
+    
+    # Return density (avoid division by zero)
+    if volume > 0:
+        return point_count / volume
+    else:
+        return 0.0
+
+
+def density_based_tie_breaker(blocks, block_indices, block_labels):
+    """
+    Break ties by selecting the most dense hyperblock.
+    
+    Args:
+        blocks (list): List of hyperblock dictionaries
+        block_indices (list): Indices of blocks involved in the tie
+        block_labels (np.ndarray): Block class labels
+    
+    Returns:
+        int: Class label of the most dense hyperblock
+    """
+    if not block_indices:
+        return None
+    
+    # Calculate density for each block in the tie
+    block_densities = []
+    for idx in block_indices:
+        if idx < len(blocks):
+            density = calculate_hyperblock_density(blocks[idx])
+            block_densities.append((density, idx, block_labels[idx]))
+    
+    if not block_densities:
+        return None
+    
+    # Sort by density (highest first)
+    block_densities.sort(key=lambda x: x[0], reverse=True)
+    
+    # Return the class of the most dense block
+    return block_densities[0][2]
+
+
+# =============================================================================
 # CLASSIFICATION FUNCTIONS
 # =============================================================================
 
 def classify_batch(points, block_bounds, block_labels, k, norm, blocks=None):
     """
     Classify a batch of points using hyperblocks and k-NN logic.
+    
+    This function implements a hierarchical tie-breaking system:
+    1. First tries confidence scores if available
+    2. Falls back to Copeland's method for voting ties
+    3. Uses density-based tie breaker (point count / volume) for perfect ties
     
     Args:
         points (np.ndarray): Points to classify
@@ -1006,6 +1109,20 @@ def classify_batch(points, block_bounds, block_labels, k, norm, blocks=None):
                         copeland_scores[class_a] = score
                     
                     best_class = max(copeland_scores, key=copeland_scores.get)
+                    
+                    # Check if there's still a tie after Copeland's method
+                    max_score = copeland_scores[best_class]
+                    tied_classes = [cls for cls, score in copeland_scores.items() if score == max_score]
+                    
+                    if len(tied_classes) > 1 and blocks is not None:
+                        # Use density-based tie breaker
+                        tied_indices = [idx for idx in contained_indices if block_labels[idx] in tied_classes]
+                        density_winner = density_based_tie_breaker(blocks, tied_indices, block_labels)
+                        if density_winner is not None:
+                            best_class = density_winner
+                            # Log when density tie breaker is used
+                            print(f"Density tie breaker used: {tied_classes} -> {best_class}")
+                    
                     predictions[i] = best_class
             
             contained_count += 1
@@ -1033,6 +1150,20 @@ def classify_batch(points, block_bounds, block_labels, k, norm, blocks=None):
                     copeland_scores[class_a] = score
                 
                 best_class = max(copeland_scores, key=copeland_scores.get)
+                
+                # Check if there's still a tie after Copeland's method
+                max_score = copeland_scores[best_class]
+                tied_classes = [cls for cls, score in copeland_scores.items() if score == max_score]
+                
+                if len(tied_classes) > 1 and blocks is not None:
+                    # Use density-based tie breaker
+                    tied_indices = [idx for idx in min_dist_indices if block_labels[idx] in tied_classes]
+                    density_winner = density_based_tie_breaker(blocks, tied_indices, block_labels)
+                    if density_winner is not None:
+                        best_class = density_winner
+                        # Log when density tie breaker is used
+                        print(f"Density tie breaker used (k-NN): {tied_classes} -> {best_class}")
+                
                 predictions[i] = best_class
             
             knn_count += 1
