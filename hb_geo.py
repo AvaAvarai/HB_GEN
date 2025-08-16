@@ -31,16 +31,36 @@ warnings.filterwarnings('ignore')
 # CONSTANTS AND CONFIGURATION
 # =============================================================================
 
-# Default parameters
+# Global diagnostic flag for controlling logging output
+DIAGNOSTIC_MODE = False
+
+# Hyperblock parameters
 DEFAULT_VOLUME_THRESHOLD = 1e-10
 DEFAULT_DUPLICATE_TOLERANCE = 1e-6
 DEFAULT_MISCLASSIFICATION_THRESHOLD = 0.1
 DEFAULT_SHRINK_EPSILON = 0.1
 DEFAULT_MIN_POINTS_FOR_PENALTY = 3
-DEFAULT_K_FOLDS = 10
-DEFAULT_RANDOM_STATE = 42
 DEFAULT_MAX_SPLITS = 3
 DEFAULT_MIN_POINTS_PER_SPLIT = 2
+
+# Cross-validation and PRNG parameters
+DEFAULT_K_FOLDS = 10
+DEFAULT_RANDOM_STATE = 42
+
+# =============================================================================
+# LOGGING UTILITY FUNCTIONS
+# =============================================================================
+
+def diagnostic_print(*args, **kwargs):
+    """
+    Print function that only outputs when diagnostic mode is enabled.
+    
+    Args:
+        *args: Arguments to print
+        **kwargs: Keyword arguments for print function
+    """
+    if DIAGNOSTIC_MODE:
+        print(*args, **kwargs)
 
 # =============================================================================
 # CORE GEOMETRIC FUNCTIONS
@@ -396,7 +416,7 @@ def check_block_purity_and_refine(blocks, X, y, max_splits=3, min_points_per_spl
         refined_blocks.extend(refined_sub_blocks)
     
     if blocks_refined > 0:
-        print(f"Purity refinement: {blocks_refined}/{total_original_blocks} blocks refined "
+        diagnostic_print(f"Purity refinement: {blocks_refined}/{total_original_blocks} blocks refined "
               f"({len(refined_blocks)} total blocks after refinement)")
     
     return refined_blocks
@@ -444,7 +464,7 @@ def _split_block_until_pure(block, block_points, block_point_classes, X, y,
     # Log the split decision
     other_class_count = np.sum(block_point_classes != block_class)
     target_class_count = np.sum(block_point_classes == block_class)
-    print(f"  Splitting block (class {block_class}): {target_class_count} target, {other_class_count} other points")
+    diagnostic_print(f"  Splitting block (class {block_class}): {target_class_count} target, {other_class_count} other points")
     
     # Create two sub-blocks
     sub_blocks = []
@@ -613,7 +633,7 @@ def _shrink_block_to_purity(block, block_points, block_point_classes, X, y):
     # Log the shrinking
     other_class_count = np.sum(block_point_classes != block_class)
     target_class_count = np.sum(block_point_classes == block_class)
-    print(f"  Shrunk block (class {block_class}): {target_class_count} target, {other_class_count} other points")
+    diagnostic_print(f"  Shrunk block (class {block_class}): {target_class_count} target, {other_class_count} other points")
     
     return [shrunk_block]
 
@@ -762,7 +782,7 @@ def remove_contained_blocks(blocks):
     
     removed_count = len(blocks) - len(filtered_blocks)
     if removed_count > 0:
-        print(f"Removed {removed_count} contained blocks")
+        diagnostic_print(f"Removed {removed_count} contained blocks")
     
     return filtered_blocks
 
@@ -1121,7 +1141,7 @@ def classify_batch(points, block_bounds, block_labels, k, norm, blocks=None):
                         if density_winner is not None:
                             best_class = density_winner
                             # Log when density tie breaker is used
-                            print(f"Density tie breaker used: {tied_classes} -> {best_class}")
+                            diagnostic_print(f"Density tie breaker used: {tied_classes} -> {best_class}")
                     
                     predictions[i] = best_class
             
@@ -1162,7 +1182,7 @@ def classify_batch(points, block_bounds, block_labels, k, norm, blocks=None):
                     if density_winner is not None:
                         best_class = density_winner
                         # Log when density tie breaker is used
-                        print(f"Density tie breaker used (k-NN): {tied_classes} -> {best_class}")
+                        diagnostic_print(f"Density tie breaker used (k-NN): {tied_classes} -> {best_class}")
                 
                 predictions[i] = best_class
             
@@ -1382,20 +1402,20 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=DEFA
         return pd.DataFrame()
     
     # Print results
-    print("\nClass mapping:")
+    diagnostic_print("\nClass mapping:")
     for class_num in np.unique(y):
-        print(f"  {class_num}: {classes[class_num]}")
-    print()
+        diagnostic_print(f"  {class_num}: {classes[class_num]}")
+    diagnostic_print()
     
     fold_accuracies = []
     for df in valid_results:
         if not df.empty:
             fold_accuracies.append(df.iloc[0]['accuracy'])
     
-    if fold_accuracies:
-        print("Per-fold results:")
-        fold_contained = []
-        fold_knn = []
+            if fold_accuracies:
+                diagnostic_print("Per-fold results:")
+                fold_contained = []
+                fold_knn = []
         
         for i, (df, num_blocks, norm, k, predictions, y_test, X_test, blocks) in enumerate(
             zip(valid_results, block_counts, learned_norms, learned_ks, 
@@ -1408,11 +1428,11 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=DEFA
                 fold_contained.append(contained)
                 fold_knn.append(knn)
                 
-                print(f"Fold {i+1}: accuracy = {acc:.4f}, blocks = {num_blocks}, "
+                diagnostic_print(f"Fold {i+1}: accuracy = {acc:.4f}, blocks = {num_blocks}, "
                       f"contained = {contained}, k-NN = {knn}, norm = {norm}, k = {k}")
-                print(f"Confusion Matrix (Fold {i+1}):")
-                print(confusion_matrix(y_test, predictions))
-                print()
+                diagnostic_print(f"Confusion Matrix (Fold {i+1}):")
+                diagnostic_print(confusion_matrix(y_test, predictions))
+                diagnostic_print()
                 
                 # Analyze misclassifications for this fold
                 analyze_misclassifications(X_test, y_test, predictions, blocks, classes, features, i, learned_norm=norm)
@@ -1432,8 +1452,8 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=DEFA
             std_contained = np.std(fold_contained)
             avg_knn = np.mean(fold_knn)
             std_knn = np.std(fold_knn)
-            print(f"Average contained cases per fold: {avg_contained:.1f} ± {std_contained:.1f}")
-            print(f"Average k-NN cases per fold: {avg_knn:.1f} ± {std_knn:.1f}")
+            diagnostic_print(f"Average contained cases per fold: {avg_contained:.1f} ± {std_contained:.1f}")
+            diagnostic_print(f"Average k-NN cases per fold: {avg_knn:.1f} ± {std_knn:.1f}")
     
     # Save hyperblock bounds
     save_hyperblock_bounds_to_csv(all_blocks_per_fold, classes, features, k_folds)
@@ -1490,9 +1510,9 @@ def save_hyperblock_bounds_to_csv(all_blocks_per_fold, classes, feature_names, k
     df_bounds = pd.DataFrame(csv_data)
     df_bounds.to_csv(filename, index=False)
     
-    print(f"\nHyperblock bounds saved to: {filename}")
-    print(f"Total hyperblocks recorded: {len(csv_data)}")
-    print(f"Folds processed: {len(all_blocks_per_fold)}")
+    diagnostic_print(f"\nHyperblock bounds saved to: {filename}")
+    diagnostic_print(f"Total hyperblocks recorded: {len(csv_data)}")
+    diagnostic_print(f"Folds processed: {len(all_blocks_per_fold)}")
 
 
 def analyze_misclassifications(X_test, y_test, predictions, blocks, classes, features, fold_num, learned_norm='L2'):
@@ -1515,11 +1535,11 @@ def analyze_misclassifications(X_test, y_test, predictions, blocks, classes, fea
     misclassified_indices = np.where(y_test != predictions)[0]
     
     if len(misclassified_indices) == 0:
-        print(f"Fold {fold_num + 1}: No misclassifications!")
+        diagnostic_print(f"Fold {fold_num + 1}: No misclassifications!")
         return
     
-    print(f"\n=== DETAILED MISCLASSIFICATION ANALYSIS (Fold {fold_num + 1}) ===")
-    print(f"Total misclassifications: {len(misclassified_indices)} out of {len(y_test)} "
+    diagnostic_print(f"\n=== DETAILED MISCLASSIFICATION ANALYSIS (Fold {fold_num + 1}) ===")
+    diagnostic_print(f"Total misclassifications: {len(misclassified_indices)} out of {len(y_test)} "
           f"({len(misclassified_indices)/len(y_test)*100:.1f}%)")
     
     # Get block information for analysis
@@ -1531,10 +1551,10 @@ def analyze_misclassifications(X_test, y_test, predictions, blocks, classes, fea
         pred_class = predictions[idx]
         point = X_test[idx]
         
-        print(f"\n--- Misclassified Point {idx} ---")
-        print(f"True class: {true_class} ({classes[true_class]})")
-        print(f"Predicted class: {pred_class} ({classes[pred_class]})")
-        print(f"Point features: {dict(zip(features, point))}")
+        diagnostic_print(f"\n--- Misclassified Point {idx} ---")
+        diagnostic_print(f"True class: {true_class} ({classes[true_class]})")
+        diagnostic_print(f"Predicted class: {pred_class} ({classes[pred_class]})")
+        diagnostic_print(f"Point features: {dict(zip(features, point))}")
         
         # Find distances to all blocks
         distances = []
@@ -1545,10 +1565,10 @@ def analyze_misclassifications(X_test, y_test, predictions, blocks, classes, fea
         # Sort by distance
         distances.sort()
         
-        print(f"Distance to nearest blocks:")
+        diagnostic_print(f"Distance to nearest blocks:")
         for i, (dist, block_idx, block_class) in enumerate(distances[:5]):
             class_name = classes[block_class]
-            print(f"  {i+1}. Block {block_idx} (class {block_class}: {class_name}): distance = {dist:.6f}")
+            diagnostic_print(f"  {i+1}. Block {block_idx} (class {block_class}: {class_name}): distance = {dist:.6f}")
         
         # Check if point is contained in any block
         contained_in = []
@@ -1557,14 +1577,14 @@ def analyze_misclassifications(X_test, y_test, predictions, blocks, classes, fea
                 contained_in.append((i, block_labels[i]))
         
         if contained_in:
-            print(f"Point is contained in {len(contained_in)} block(s):")
+            diagnostic_print(f"Point is contained in {len(contained_in)} block(s):")
             for block_idx, block_class in contained_in:
-                print(f"  - Block {block_idx} (class {block_class}: {classes[block_class]})")
+                diagnostic_print(f"  - Block {block_idx} (class {block_class}: {classes[block_class]})")
         else:
-            print("Point is not contained in any block (using k-NN)")
+            diagnostic_print("Point is not contained in any block (using k-NN)")
     
     # Summary statistics
-    print(f"\n--- Misclassification Summary (Fold {fold_num + 1}) ---")
+    diagnostic_print(f"\n--- Misclassification Summary (Fold {fold_num + 1}) ---")
     misclass_matrix = {}
     for true_class in np.unique(y_test):
         for pred_class in np.unique(y_test):
@@ -1575,11 +1595,11 @@ def analyze_misclassifications(X_test, y_test, predictions, blocks, classes, fea
                     misclass_matrix[key] = count
     
     if misclass_matrix:
-        print("Misclassification patterns:")
+        diagnostic_print("Misclassification patterns:")
         for (true_class, pred_class), count in sorted(misclass_matrix.items()):
             true_name = classes[true_class]
             pred_name = classes[pred_class]
-            print(f"  {true_name} → {pred_name}: {count} cases")
+            diagnostic_print(f"  {true_name} → {pred_name}: {count} cases")
 
 
 # =============================================================================
@@ -1597,11 +1617,15 @@ def main():
                        help='Path to single dataset CSV (default)')
     parser.add_argument('--k-folds', type=int, default=DEFAULT_K_FOLDS,
                        help='Number of cross-validation folds')
+    parser.add_argument('--diagnostic', action='store_true', help='Enable diagnostic mode (more logging)')
     args = parser.parse_args()
     
+    global DIAGNOSTIC_MODE
+    DIAGNOSTIC_MODE = args.diagnostic
+
     if args.train and args.test:
         # Separate train/test datasets
-        print("Loading separate train and test datasets...")
+        diagnostic_print("Loading separate train and test datasets...")
         df_train = pd.read_csv(args.train)
         df_test = pd.read_csv(args.test)
         
@@ -1611,7 +1635,7 @@ def main():
         X_test_raw = df_test[features].values
         y_test_raw = df_test['class'].values
         
-        print("Preprocessing data...")
+        diagnostic_print("Preprocessing data...")
         scaler = MinMaxScaler()
         X_train = scaler.fit_transform(X_train_raw)
         X_test = scaler.transform(X_test_raw)
@@ -1622,13 +1646,13 @@ def main():
         
         feature_indices = list(range(X_train.shape[1]))
         
-        print(f"Training set shape: {X_train.shape}")
-        print(f"Test set shape: {X_test.shape}")
-        print(f"Classes: {y_encoder.classes_}")
-        print(f"Features: {len(feature_indices)}")
+        diagnostic_print(f"Training set shape: {X_train.shape}")
+        diagnostic_print(f"Test set shape: {X_test.shape}")
+        diagnostic_print(f"Classes: {y_encoder.classes_}")
+        diagnostic_print(f"Features: {len(feature_indices)}")
         
         # Run cross-validation
-        print("\nRunning cross-validation...")
+        diagnostic_print("\nRunning cross-validation...")
         scores = cross_validate_blocks(X_train, y_train, feature_indices, 
                                      y_encoder.classes_, features, args.k_folds)
         
@@ -1637,14 +1661,14 @@ def main():
         
     else:
         # Single dataset with cross-validation
-        print("Loading dataset...")
+        diagnostic_print("Loading dataset...")
         df = pd.read_csv(args.dataset)
         
         features = df.columns[:-1]
         X_raw = df[features].values
         y_raw = df['class'].values
         
-        print("Preprocessing data...")
+        diagnostic_print("Preprocessing data...")
         scaler = MinMaxScaler()
         X = scaler.fit_transform(X_raw)
         
@@ -1653,11 +1677,11 @@ def main():
         
         feature_indices = list(range(X.shape[1]))
         
-        print(f"Dataset shape: {X.shape}")
-        print(f"Classes: {y_encoder.classes_}")
-        print(f"Features: {len(feature_indices)}")
+        diagnostic_print(f"Dataset shape: {X.shape}")
+        diagnostic_print(f"Classes: {y_encoder.classes_}")
+        diagnostic_print(f"Features: {len(feature_indices)}")
         
-        print("\nRunning cross-validation...")
+        diagnostic_print("\nRunning cross-validation...")
         scores = cross_validate_blocks(X, y, feature_indices, 
                                      y_encoder.classes_, features, args.k_folds)
         
