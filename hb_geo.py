@@ -73,13 +73,13 @@ def distance_to_hyperblock(point, bounds, norm=2):
     Args:
         point (np.ndarray): Point coordinates
         bounds (np.ndarray): Hyperblock bounds as (n_features, 2) array [min, max]
-        norm (int): Distance norm (1 for L1, 2 for L2, 'inf' for L∞)
+        norm (int): Distance norm (1 for L1, 2 for L2, 'inf' for Linf)
     
     Returns:
         float: Distance from point to hyperblock
         
     Note:
-        L∞ (Chebyshev) distance is particularly natural for axis-aligned boxes as it
+        Linf (Chebyshev) distance is particularly natural for axis-aligned boxes as it
         equals the maximum componentwise violation, reducing "almost contained" ties
         that L1 distance tends to favor.
     """
@@ -1193,7 +1193,7 @@ def classify_with_hyperblocks(X, y, blocks, k_values=None):
             acc = accuracy_score(y, predictions)
             
             results.append({
-                'norm': f'L{norm}' if norm != 'inf' else 'L∞',
+                'norm': f'L{norm}' if norm != 'inf' else 'Linf',
                 'k': k,
                 'accuracy': acc,
                 'preds': predictions.tolist(),
@@ -1234,7 +1234,7 @@ def learn_optimal_hyperparameters(X_train, y_train, blocks):
             
             if accuracy > best_accuracy:
                 best_accuracy = accuracy
-                best_norm = f'L{norm}' if norm != 'inf' else 'L∞'
+                best_norm = f'L{norm}' if norm != 'inf' else 'Linf'
                 best_k = k
     
     return best_norm, best_k
@@ -1407,16 +1407,16 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=DEFA
     std_blocks = np.std(block_counts)
     
     print("Cross-validation summary:")
-    print(f"Average accuracy across all folds: {avg_accuracy:.4f} ± {std_accuracy:.4f}")
-    print(f"Average blocks per fold: {avg_blocks:.1f} ± {std_blocks:.1f}")
+    print(f"Average accuracy across all folds: {avg_accuracy:.4f} +/- {std_accuracy:.4f}")
+    print(f"Average blocks per fold: {avg_blocks:.1f} +/- {std_blocks:.1f}")
     
     if fold_contained:
         avg_contained = np.mean(fold_contained)
         std_contained = np.std(fold_contained)
         avg_knn = np.mean(fold_knn)
         std_knn = np.std(fold_knn)
-        diagnostic_print(f"Average contained cases per fold: {avg_contained:.1f} ± {std_contained:.1f}")
-        diagnostic_print(f"Average k-NN cases per fold: {avg_knn:.1f} ± {std_knn:.1f}")
+        diagnostic_print(f"Average contained cases per fold: {avg_contained:.1f} +/- {std_contained:.1f}")
+        diagnostic_print(f"Average k-NN cases per fold: {avg_knn:.1f} +/- {std_knn:.1f}")
     
     # Save hyperblock bounds
     save_hyperblock_bounds_to_csv(all_blocks_per_fold, classes, features, k_folds)
