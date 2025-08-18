@@ -17,7 +17,7 @@ import multiprocessing
 
 import numpy as np
 import pandas as pd
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+
 from sklearn.metrics import accuracy_score, confusion_matrix, silhouette_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
@@ -176,37 +176,6 @@ def intersection_refinement(class_points, other_points, sorted_features, num_fea
 # HYPERBLOCK CONSTRUCTION
 # =============================================================================
 
-def compute_feature_importance(X, y, class_label):
-    """
-    Compute feature importance using LDA-based covariance analysis.
-    
-    Args:
-        X (np.ndarray): Feature matrix
-        y (np.ndarray): Target labels
-        class_label (int): Target class label
-    
-    Returns:
-        np.ndarray: Feature importance scores
-    """
-    num_features = X.shape[1]
-    
-    try:
-        y_binary = (y == class_label).astype(int)
-        lda = LinearDiscriminantAnalysis()
-        lda.fit(X, y_binary)
-        lda_projection = lda.transform(X).flatten()
-        
-        feature_covariances = []
-        for i in range(num_features):
-            axis_values = X[:, i]
-            covariance = np.cov(lda_projection, axis_values)[0, 1]
-            feature_covariances.append(abs(covariance))
-        
-        return np.array(feature_covariances)
-    except:
-        return np.ones(num_features)
-
-
 def find_optimal_clusters(class_points, max_clusters=None):
     """
     Find optimal number of clusters by generating clusters until they are no longer 
@@ -305,9 +274,8 @@ def compute_envelope_blocks_for_class(args):
     num_features = X.shape[1]
     blocks = []
     
-    # Compute feature importance
-    feature_importance = compute_feature_importance(X, y, class_label)
-    sorted_features = np.argsort(feature_importance)[::-1]
+    # Use sequential feature ordering instead of LDA-based importance
+    sorted_features = np.arange(num_features)
     
     # Find optimal number of clusters - let algorithm determine when to stop
     best_n_clusters = find_optimal_clusters(class_points, max_clusters=None)
@@ -1408,52 +1376,47 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=DEFA
     diagnostic_print()
     
     fold_accuracies = []
-    for df in valid_results:
-        if not df.empty:
-            fold_accuracies.append(df.iloc[0]['accuracy'])
+    fold_contained = []
+    fold_knn = []
     
-            if fold_accuracies:
-                diagnostic_print("Per-fold results:")
-                fold_contained = []
-                fold_knn = []
+    for i, (df, num_blocks, norm, k, predictions, y_test, X_test, blocks) in enumerate(
+        zip(valid_results, block_counts, learned_norms, learned_ks, 
+            all_predictions, all_true_labels, all_test_data, all_blocks_per_fold)):
         
-        for i, (df, num_blocks, norm, k, predictions, y_test, X_test, blocks) in enumerate(
-            zip(valid_results, block_counts, learned_norms, learned_ks, 
-                all_predictions, all_true_labels, all_test_data, all_blocks_per_fold)):
+        if not df.empty:
+            acc = df.iloc[0]['accuracy']
+            contained = df.iloc[0]['contained_count']
+            knn = df.iloc[0]['knn_count']
+            fold_accuracies.append(acc)
+            fold_contained.append(contained)
+            fold_knn.append(knn)
             
-            if not df.empty:
-                acc = df.iloc[0]['accuracy']
-                contained = df.iloc[0]['contained_count']
-                knn = df.iloc[0]['knn_count']
-                fold_contained.append(contained)
-                fold_knn.append(knn)
-                
-                diagnostic_print(f"Fold {i+1}: accuracy = {acc:.4f}, blocks = {num_blocks}, "
-                      f"contained = {contained}, k-NN = {knn}, norm = {norm}, k = {k}")
-                diagnostic_print(f"Confusion Matrix (Fold {i+1}):")
-                diagnostic_print(confusion_matrix(y_test, predictions))
-                diagnostic_print()
-                
-                # Analyze misclassifications for this fold
-                analyze_misclassifications(X_test, y_test, predictions, blocks, classes, features, i, learned_norm=norm)
-        
-        # Summary statistics
-        avg_accuracy = np.mean(fold_accuracies)
-        std_accuracy = np.std(fold_accuracies)
-        avg_blocks = np.mean(block_counts)
-        std_blocks = np.std(block_counts)
-        
-        print("Cross-validation summary:")
-        print(f"Average accuracy across all folds: {avg_accuracy:.4f} ± {std_accuracy:.4f}")
-        print(f"Average blocks per fold: {avg_blocks:.1f} ± {std_blocks:.1f}")
-        
-        if fold_contained:
-            avg_contained = np.mean(fold_contained)
-            std_contained = np.std(fold_contained)
-            avg_knn = np.mean(fold_knn)
-            std_knn = np.std(fold_knn)
-            diagnostic_print(f"Average contained cases per fold: {avg_contained:.1f} ± {std_contained:.1f}")
-            diagnostic_print(f"Average k-NN cases per fold: {avg_knn:.1f} ± {std_knn:.1f}")
+            diagnostic_print(f"Fold {i+1}: accuracy = {acc:.4f}, blocks = {num_blocks}, "
+                  f"contained = {contained}, k-NN = {knn}, norm = {norm}, k = {k}")
+            diagnostic_print(f"Confusion Matrix (Fold {i+1}):")
+            diagnostic_print(confusion_matrix(y_test, predictions))
+            diagnostic_print()
+            
+            # Analyze misclassifications for this fold
+            analyze_misclassifications(X_test, y_test, predictions, blocks, classes, features, i, learned_norm=norm)
+    
+    # Summary statistics
+    avg_accuracy = np.mean(fold_accuracies)
+    std_accuracy = np.std(fold_accuracies)
+    avg_blocks = np.mean(block_counts)
+    std_blocks = np.std(block_counts)
+    
+    print("Cross-validation summary:")
+    print(f"Average accuracy across all folds: {avg_accuracy:.4f} ± {std_accuracy:.4f}")
+    print(f"Average blocks per fold: {avg_blocks:.1f} ± {std_blocks:.1f}")
+    
+    if fold_contained:
+        avg_contained = np.mean(fold_contained)
+        std_contained = np.std(fold_contained)
+        avg_knn = np.mean(fold_knn)
+        std_knn = np.std(fold_knn)
+        diagnostic_print(f"Average contained cases per fold: {avg_contained:.1f} ± {std_contained:.1f}")
+        diagnostic_print(f"Average k-NN cases per fold: {avg_knn:.1f} ± {std_knn:.1f}")
     
     # Save hyperblock bounds
     save_hyperblock_bounds_to_csv(all_blocks_per_fold, classes, features, k_folds)
