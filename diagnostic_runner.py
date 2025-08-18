@@ -106,25 +106,25 @@ def parse_output(output, dataset_name):
         }
         
         # Extract accuracy
-        accuracy_match = re.search(r'Average accuracy across all folds: ([\d.]+) ± ([\d.]+)', output)
+        accuracy_match = re.search(r'Average accuracy across all folds: ([\d.]+) \+\/- ([\d.]+)', output)
         if accuracy_match:
             metrics['avg_accuracy'] = float(accuracy_match.group(1))
             metrics['std_accuracy'] = float(accuracy_match.group(2))
         
         # Extract blocks
-        blocks_match = re.search(r'Average blocks per fold: ([\d.]+) ± ([\d.]+)', output)
+        blocks_match = re.search(r'Average blocks per fold: ([\d.]+) \+\/- ([\d.]+)', output)
         if blocks_match:
             metrics['avg_blocks'] = float(blocks_match.group(1))
             metrics['std_blocks'] = float(blocks_match.group(2))
         
         # Extract contained cases
-        contained_match = re.search(r'Average contained cases per fold: ([\d.]+) ± ([\d.]+)', output)
+        contained_match = re.search(r'Average contained cases per fold: ([\d.]+) \+\/- ([\d.]+)', output)
         if contained_match:
             metrics['avg_contained'] = float(contained_match.group(1))
             metrics['std_contained'] = float(contained_match.group(2))
         
         # Extract k-NN cases
-        knn_match = re.search(r'Average k-NN cases per fold: ([\d.]+) ± ([\d.]+)', output)
+        knn_match = re.search(r'Average k-NN cases per fold: ([\d.]+) \+\/- ([\d.]+)', output)
         if knn_match:
             metrics['avg_knn'] = float(knn_match.group(1))
             metrics['std_knn'] = float(knn_match.group(2))
@@ -165,10 +165,10 @@ def generate_summary_table(results):
     
     # Data rows
     for _, row in df.iterrows():
-        accuracy_str = f"{row['avg_accuracy']:.4f} ± {row['std_accuracy']:.4f}"
-        blocks_str = f"{row['avg_blocks']:.1f} ± {row['std_blocks']:.1f}"
-        contained_str = f"{row['avg_contained']:.1f} ± {row['std_contained']:.1f}"
-        knn_str = f"{row['avg_knn']:.1f} ± {row['std_knn']:.1f}"
+        accuracy_str = f"{row['avg_accuracy']:.4f} +/- {row['std_accuracy']:.4f}"
+        blocks_str = f"{row['avg_blocks']:.1f} +/- {row['std_blocks']:.1f}"
+        contained_str = f"{row['avg_contained']:.1f} +/- {row['std_contained']:.1f}"
+        knn_str = f"{row['avg_knn']:.1f} +/- {row['std_knn']:.1f}"
         
         data_row = f"{row['dataset']:<25} {accuracy_str:<15} {blocks_str:<12} {contained_str:<15} {knn_str:<12}"
         table.append(data_row)
