@@ -23,9 +23,7 @@ DATASETS = {
     'Wheat Seeds': 'datasets/wheat_seeds.csv',
     'Diabetes': 'datasets/diabetes.csv',
     'Heart Disease': 'datasets/heart_disease.csv',
-    'Glass': 'datasets/glass.csv',
-    'Wine': 'datasets/wine.csv',
-    'Musk': 'datasets/musk.csv'
+    'Glass': 'datasets/glass.csv'
 }
 
 def run_dataset_analysis(dataset_name, dataset_path, k_folds=10):
@@ -198,7 +196,7 @@ def save_results_to_csv(results, filename=None):
         filename = f"hyperblock_diagnostic_results_{timestamp}.csv"
     
     df = pd.DataFrame(results)
-    df.to_csv(filename, index=False)
+    df.to_csv(filename, index=False, encoding='utf-8')
     print(f"\nResults saved to: {filename}")
 
 def main():
@@ -260,7 +258,7 @@ def create_detailed_report(results):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_filename = f"hyperblock_diagnostic_report_{timestamp}.txt"
     
-    with open(report_filename, 'w') as f:
+    with open(report_filename, 'w', encoding='utf-8') as f:
         f.write("HYPERBLOCK CLASSIFICATION DIAGNOSTIC REPORT\n")
         f.write("=" * 50 + "\n")
         f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -302,7 +300,7 @@ def create_detailed_report(results):
         medium_performance = df[(df['avg_accuracy'] >= 0.75) & (df['avg_accuracy'] < 0.90)]
         low_performance = df[df['avg_accuracy'] < 0.75]
         
-        f.write(f"High performance (≥90%): {len(high_performance)} datasets\n")
+        f.write(f"High performance (>=90%): {len(high_performance)} datasets\n")
         for _, row in high_performance.iterrows():
             f.write(f"  - {row['dataset']}: {row['avg_accuracy']:.4f}\n")
         
