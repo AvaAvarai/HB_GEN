@@ -1562,7 +1562,7 @@ def analyze_misclassifications(X_test, y_test, predictions, blocks, classes, fea
         for (true_class, pred_class), count in sorted(misclass_matrix.items()):
             true_name = classes[true_class]
             pred_name = classes[pred_class]
-            diagnostic_print(f"  {true_name} → {pred_name}: {count} cases")
+            diagnostic_print(f"  {true_name} -> {pred_name}: {count} cases")
 
 
 # =============================================================================
