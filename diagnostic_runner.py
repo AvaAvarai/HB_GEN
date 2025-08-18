@@ -53,7 +53,8 @@ def run_dataset_analysis(dataset_name, dataset_path, k_folds=10):
         cmd = [
             sys.executable, 'hb_geo.py',
             '--dataset', dataset_path,
-            '--k-folds', str(k_folds)
+            '--k-folds', str(k_folds),
+            '--diagnostic'
         ]
         
         print(f"Running command: {' '.join(cmd)}")
@@ -62,8 +63,7 @@ def run_dataset_analysis(dataset_name, dataset_path, k_folds=10):
         result = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
-            timeout=300  # 5 minute timeout
+            text=True
         )
         
         if result.returncode != 0:
@@ -76,9 +76,6 @@ def run_dataset_analysis(dataset_name, dataset_path, k_folds=10):
         output = result.stdout
         return parse_output(output, dataset_name)
         
-    except subprocess.TimeoutExpired:
-        print(f"ERROR: Analysis timed out for {dataset_name}")
-        return None
     except Exception as e:
         print(f"ERROR: Failed to analyze {dataset_name}: {str(e)}")
         return None
@@ -267,52 +264,8 @@ def create_detailed_report(results):
         # Summary table
         summary_table = generate_summary_table(results)
         f.write(summary_table + "\n\n")
-        
-        # Detailed analysis
-        df = pd.DataFrame(results)
-        
-        f.write("DETAILED ANALYSIS:\n")
-        f.write("-" * 30 + "\n")
-        
-        # Best performing dataset
-        best_dataset = df.loc[df['avg_accuracy'].idxmax()]
-        f.write(f"Best performing dataset: {best_dataset['dataset']} (Accuracy: {best_dataset['avg_accuracy']:.4f})\n")
-        
-        # Worst performing dataset
-        worst_dataset = df.loc[df['avg_accuracy'].idxmin()]
-        f.write(f"Worst performing dataset: {worst_dataset['dataset']} (Accuracy: {worst_dataset['avg_accuracy']:.4f})\n")
-        
-        # Dataset with most blocks
-        most_blocks = df.loc[df['avg_blocks'].idxmax()]
-        f.write(f"Dataset with most blocks: {most_blocks['dataset']} ({most_blocks['avg_blocks']:.1f} blocks)\n")
-        
-        # Dataset with least blocks
-        least_blocks = df.loc[df['avg_blocks'].idxmin()]
-        f.write(f"Dataset with least blocks: {least_blocks['dataset']} ({least_blocks['avg_blocks']:.1f} blocks)\n")
-        
-        f.write("\n")
-        
-        # Performance categories
-        f.write("PERFORMANCE CATEGORIES:\n")
-        f.write("-" * 25 + "\n")
-        
-        high_performance = df[df['avg_accuracy'] >= 0.90]
-        medium_performance = df[(df['avg_accuracy'] >= 0.75) & (df['avg_accuracy'] < 0.90)]
-        low_performance = df[df['avg_accuracy'] < 0.75]
-        
-        f.write(f"High performance (>=90%): {len(high_performance)} datasets\n")
-        for _, row in high_performance.iterrows():
-            f.write(f"  - {row['dataset']}: {row['avg_accuracy']:.4f}\n")
-        
-        f.write(f"\nMedium performance (75-90%): {len(medium_performance)} datasets\n")
-        for _, row in medium_performance.iterrows():
-            f.write(f"  - {row['dataset']}: {row['avg_accuracy']:.4f}\n")
-        
-        f.write(f"\nLow performance (<75%): {len(low_performance)} datasets\n")
-        for _, row in low_performance.iterrows():
-            f.write(f"  - {row['dataset']}: {row['avg_accuracy']:.4f}\n")
-    
-    print(f"Detailed report saved to: {report_filename}")
+
+    print(f"Report saved to: {report_filename}")
 
 if __name__ == "__main__":
     main()
