@@ -6,7 +6,6 @@ geometric regions (hyperblocks) around class points and uses distance-based
 classification with k-NN fallback.
 
 Author: Alice Williams
-Date last modified: 2025-08-11
 """
 
 import os
@@ -18,10 +17,9 @@ import multiprocessing
 import numpy as np
 import pandas as pd
 
-from sklearn.metrics import accuracy_score, confusion_matrix, silhouette_score
+from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
-from sklearn.cluster import KMeans
 from tqdm import tqdm
 
 # Suppress warnings for cleaner output
@@ -43,7 +41,7 @@ DEFAULT_MIN_POINTS_FOR_PENALTY = 3
 DEFAULT_MAX_SPLITS = 3
 DEFAULT_MIN_POINTS_PER_SPLIT = 2
 
-# Cross-validation and PRNG parameters
+# Cross-validation parameters
 DEFAULT_K_FOLDS = 10
 DEFAULT_RANDOM_STATE = 42
 
@@ -176,83 +174,144 @@ def intersection_refinement(class_points, other_points, sorted_features, num_fea
 # HYPERBLOCK CONSTRUCTION
 # =============================================================================
 
-def find_optimal_clusters(class_points, max_clusters=None):
+def create_interval_groups(class_points, num_intervals_per_dim=2, min_points_per_group=2):
     """
-    Find optimal number of clusters by generating clusters until they are no longer 
-    unique, large, or useful.
+    Create interval-based groups by dividing each dimension into intervals and 
+    grouping points that fall into the same intervals across all dimensions.
     
     Args:
         class_points (np.ndarray): Points from the target class
-        max_clusters (int): Maximum number of clusters to consider (optional)
+        num_intervals_per_dim (int): Number of intervals to create per dimension
+        min_points_per_group (int): Minimum points required for a valid group
     
     Returns:
-        int: Optimal number of clusters
+        list: List of group indices for each point, or None if no valid groups found
+    """
+    if len(class_points) < min_points_per_group:
+        return None
+    
+    num_features = class_points.shape[1]
+    num_points = len(class_points)
+    
+    # Calculate adaptive intervals for each dimension based on data distribution
+    intervals = []
+    for dim in range(num_features):
+        dim_values = class_points[:, dim]
+        min_val = np.min(dim_values)
+        max_val = np.max(dim_values)
+        
+        # Create adaptive intervals based on data distribution
+        if max_val > min_val and num_intervals_per_dim > 1:
+            # Use percentiles for more balanced intervals
+            percentiles = np.linspace(0, 100, num_intervals_per_dim + 1)
+            interval_boundaries = np.percentile(dim_values, percentiles)
+            
+            dim_intervals = []
+            for i in range(num_intervals_per_dim):
+                lower = interval_boundaries[i]
+                upper = interval_boundaries[i + 1]
+                # Add small overlap to handle boundary cases
+                if i > 0:
+                    lower -= (upper - lower) * 0.05  # 5% overlap
+                if i < num_intervals_per_dim - 1:
+                    upper += (upper - lower) * 0.05  # 5% overlap
+                dim_intervals.append((lower, upper))
+        else:
+            # All values are the same or single interval - create single interval
+            dim_intervals = [(min_val, max_val)]
+        
+        intervals.append(dim_intervals)
+    
+    # Assign each point to an interval group
+    group_assignments = []
+    for point_idx in range(num_points):
+        point = class_points[point_idx]
+        group_coords = []
+        
+        for dim in range(num_features):
+            dim_val = point[dim]
+            # Find which interval this value falls into
+            for interval_idx, (lower, upper) in enumerate(intervals[dim]):
+                if lower <= dim_val <= upper:
+                    group_coords.append(interval_idx)
+                    break
+            else:
+                # Should not happen, but fallback
+                group_coords.append(0)
+        
+        group_assignments.append(tuple(group_coords))
+    
+    # Count points in each group
+    group_counts = {}
+    for group_coords in group_assignments:
+        group_counts[group_coords] = group_counts.get(group_coords, 0) + 1
+    
+    # Filter groups with too few points
+    valid_groups = {coords for coords, count in group_counts.items() 
+                   if count >= min_points_per_group}
+    
+    if not valid_groups:
+        # If no valid groups, try with fewer intervals
+        if num_intervals_per_dim > 1:
+            return create_interval_groups(class_points, num_intervals_per_dim - 1, min_points_per_group)
+        else:
+            return None
+    
+    # Create group labels
+    group_to_label = {coords: label for label, coords in enumerate(valid_groups)}
+    group_labels = [group_to_label.get(coords, -1) for coords in group_assignments]
+    
+    # Check if we have valid groups
+    valid_labels = [label for label in group_labels if label != -1]
+    if len(valid_labels) < min_points_per_group:
+        return None
+    
+    return group_labels
+
+
+def find_optimal_interval_groups(class_points, max_intervals_per_dim=4):
+    """
+    Find optimal number of intervals per dimension for interval-based grouping.
+    
+    Args:
+        class_points (np.ndarray): Points from the target class
+        max_intervals_per_dim (int): Maximum intervals per dimension to consider
+    
+    Returns:
+        int: Optimal number of intervals per dimension
     """
     if len(class_points) < 2:
         return 1
     
-    # If max_clusters is specified, use it; otherwise, start with a reasonable number
-    # and let the algorithm determine when to stop
-    if max_clusters is None:
-        max_clusters = len(class_points) // 2  # Start with half the points as potential clusters
+    best_num_intervals = 1
+    best_group_count = 1
+    best_coverage = 1.0  # Percentage of points covered by valid groups
     
-    best_n_clusters = 1
-    best_silhouette = -1
-    consecutive_declining = 0
-    max_consecutive_declining = 3  # Stop after 3 consecutive declining scores
-    
-    for n_clusters in range(1, max_clusters + 1):
-        if n_clusters == 1:
-            silhouette = 0
-        else:
-            try:
-                kmeans = KMeans(n_clusters=n_clusters, random_state=DEFAULT_RANDOM_STATE, n_init=1000)
-                cluster_labels = kmeans.fit_predict(class_points)
-                
-                # Check if clusters are unique and large enough
-                unique_labels, label_counts = np.unique(cluster_labels, return_counts=True)
-                
-                # Stop if we have too many clusters or clusters are too small
-                if len(unique_labels) < n_clusters or np.any(label_counts < 2):
-                    break
-                
-                # Calculate silhouette score
-                if len(unique_labels) > 1:
-                    silhouette = silhouette_score(class_points, cluster_labels)
-                else:
-                    silhouette = 0
-                    
-            except Exception:
-                # If clustering fails, stop here
-                break
+    for num_intervals in range(1, max_intervals_per_dim + 1):
+        group_labels = create_interval_groups(class_points, num_intervals, min_points_per_group=2)
         
-        # Check if silhouette is improving
-        if silhouette > best_silhouette:
-            best_silhouette = silhouette
-            best_n_clusters = n_clusters
-            consecutive_declining = 0
-        else:
-            consecutive_declining += 1
-            # If we've had too many consecutive declining scores, stop
-            if consecutive_declining >= max_consecutive_declining:
-                break
-        
-        # Additional stopping criteria
-        if n_clusters > 1:
-            # Stop if silhouette is very low (clusters are not well-separated)
-            if silhouette < 0.1:
-                break
+        if group_labels is not None:
+            unique_groups = len(set(group_labels))
+            coverage = len([label for label in group_labels if label != -1]) / len(class_points)
             
-            # Stop if we're creating too many tiny clusters
-            if n_clusters > len(class_points) // 3:
-                break
+            # Prefer more groups with good coverage, but avoid too many tiny groups
+            if unique_groups > best_group_count and coverage >= 0.8:
+                best_group_count = unique_groups
+                best_num_intervals = num_intervals
+                best_coverage = coverage
+            elif unique_groups == best_group_count and coverage > best_coverage:
+                best_num_intervals = num_intervals
+                best_coverage = coverage
+        else:
+            # If grouping fails, stop here
+            break
     
-    return best_n_clusters
+    return best_num_intervals
 
 
 def compute_envelope_blocks_for_class(args):
     """
-    Compute envelope blocks for a single class.
+    Compute envelope blocks for a single class using interval-based grouping.
     
     Args:
         args (tuple): (class_label, X, y, feature_indices)
@@ -277,11 +336,14 @@ def compute_envelope_blocks_for_class(args):
     # Use sequential feature ordering instead of LDA-based importance
     sorted_features = np.arange(num_features)
     
-    # Find optimal number of clusters - let algorithm determine when to stop
-    best_n_clusters = find_optimal_clusters(class_points, max_clusters=None)
+    # Find optimal number of intervals per dimension
+    best_num_intervals = find_optimal_interval_groups(class_points, max_intervals_per_dim=4)
     
-    if best_n_clusters == 1:
-        # Single cluster case
+    # Create interval groups
+    group_labels = create_interval_groups(class_points, best_num_intervals, min_points_per_group=2)
+    
+    if group_labels is None or len(set(group_labels)) <= 1:
+        # Single group case - create one hyperblock
         bounds = bounds_calculation(class_points, num_features)
         
         if other_points.shape[0] > 0:
@@ -294,25 +356,34 @@ def compute_envelope_blocks_for_class(args):
         blocks.append({
             'class': class_label,
             'bounds': bounds.tolist(),
-            'feature_order': sorted_features.tolist()
+            'feature_order': sorted_features.tolist(),
+            'grouping_method': 'interval',
+            'num_intervals': best_num_intervals
         })
     else:
-        # Multiple clusters case
-        kmeans = KMeans(n_clusters=best_n_clusters, random_state=DEFAULT_RANDOM_STATE, n_init=1000)
-        cluster_labels = kmeans.fit_predict(class_points)
+        # Multiple groups case - create hyperblock for each group
+        unique_groups = set(group_labels)
         
-        for cluster_id in range(best_n_clusters):
-            cluster_mask = cluster_labels == cluster_id
-            cluster_points = class_points[cluster_mask]
+        for group_id in unique_groups:
+            group_mask = np.array(group_labels) == group_id
+            group_points = class_points[group_mask]
             
-            if cluster_points.shape[0] == 0:
+            if group_points.shape[0] == 0:
                 continue
             
-            bounds = bounds_calculation(cluster_points, num_features)
+            bounds = bounds_calculation(group_points, num_features)
+            
+            # Add small margin to reduce boundary misclassifications
+            margin = 0.02  # 2% margin
+            for dim in range(num_features):
+                range_size = bounds[dim, 1] - bounds[dim, 0]
+                margin_size = range_size * margin
+                bounds[dim, 0] = max(0, bounds[dim, 0] - margin_size)
+                bounds[dim, 1] = min(1, bounds[dim, 1] + margin_size)
             
             if other_points.shape[0] > 0:
                 refined_bounds, has_intersection = intersection_refinement(
-                    cluster_points, other_points, sorted_features, num_features
+                    group_points, other_points, sorted_features, num_features
                 )
                 if has_intersection:
                     bounds = refined_bounds
@@ -321,7 +392,10 @@ def compute_envelope_blocks_for_class(args):
                 'class': class_label,
                 'bounds': bounds.tolist(),
                 'feature_order': sorted_features.tolist(),
-                'cluster_id': cluster_id
+                'group_id': group_id,
+                'grouping_method': 'interval',
+                'num_intervals': best_num_intervals,
+                'group_size': len(group_points)
             })
     
     return blocks
@@ -697,6 +771,121 @@ def deduplicate_blocks(blocks, tolerance=DEFAULT_DUPLICATE_TOLERANCE):
     return unique
 
 
+def merge_overlapping_blocks(blocks, overlap_threshold=0.5):
+    """
+    Merge blocks of the same class that have significant overlap.
+    
+    Args:
+        blocks (list): List of hyperblock dictionaries
+        overlap_threshold (float): Minimum overlap ratio to trigger merging
+    
+    Returns:
+        list: Blocks with overlapping blocks merged
+    """
+    if not blocks:
+        return blocks
+    
+    # Group blocks by class
+    class_blocks = {}
+    for i, block in enumerate(blocks):
+        class_label = block['class']
+        if class_label not in class_blocks:
+            class_blocks[class_label] = []
+        class_blocks[class_label].append((i, np.array(block['bounds'])))
+    
+    # Merge overlapping blocks within each class
+    merged_blocks = []
+    processed_indices = set()
+    
+    for class_label, class_block_list in class_blocks.items():
+        if len(class_block_list) <= 1:
+            # No merging needed for single block
+            for idx, bounds in class_block_list:
+                merged_blocks.append(blocks[idx])
+                processed_indices.add(idx)
+            continue
+        
+        # Find overlapping blocks
+        merged_groups = []
+        remaining_blocks = class_block_list.copy()
+        
+        while remaining_blocks:
+            current_idx, current_bounds = remaining_blocks.pop(0)
+            current_group = [current_idx]
+            
+            # Find all blocks that overlap significantly with current block
+            i = 0
+            while i < len(remaining_blocks):
+                other_idx, other_bounds = remaining_blocks[i]
+                
+                # Calculate overlap
+                overlap_volume = 1.0
+                for dim in range(len(current_bounds)):
+                    lower_overlap = max(current_bounds[dim, 0], other_bounds[dim, 0])
+                    upper_overlap = min(current_bounds[dim, 1], other_bounds[dim, 1])
+                    
+                    if lower_overlap >= upper_overlap:
+                        overlap_volume = 0.0
+                        break
+                    
+                    overlap_volume *= (upper_overlap - lower_overlap)
+                
+                if overlap_volume > 0:
+                    # Calculate overlap ratio
+                    current_volume = np.prod(current_bounds[:, 1] - current_bounds[:, 0])
+                    other_volume = np.prod(other_bounds[:, 1] - other_bounds[:, 0])
+                    min_volume = min(current_volume, other_volume)
+                    
+                    if min_volume > 0 and overlap_volume / min_volume >= overlap_threshold:
+                        current_group.append(other_idx)
+                        remaining_blocks.pop(i)
+                        # Update current bounds to include the merged block
+                        for dim in range(len(current_bounds)):
+                            current_bounds[dim, 0] = min(current_bounds[dim, 0], other_bounds[dim, 0])
+                            current_bounds[dim, 1] = max(current_bounds[dim, 1], other_bounds[dim, 1])
+                    else:
+                        i += 1
+                else:
+                    i += 1
+            
+            merged_groups.append(current_group)
+        
+        # Create merged blocks
+        for group in merged_groups:
+            if len(group) == 1:
+                # Single block, no merging needed
+                merged_blocks.append(blocks[group[0]])
+                processed_indices.add(group[0])
+            else:
+                # Merge multiple blocks
+                merged_bounds = np.array(blocks[group[0]]['bounds'])
+                for idx in group[1:]:
+                    other_bounds = np.array(blocks[idx]['bounds'])
+                    for dim in range(len(merged_bounds)):
+                        merged_bounds[dim, 0] = min(merged_bounds[dim, 0], other_bounds[dim, 0])
+                        merged_bounds[dim, 1] = max(merged_bounds[dim, 1], other_bounds[dim, 1])
+                
+                # Create merged block
+                merged_block = blocks[group[0]].copy()
+                merged_block['bounds'] = merged_bounds.tolist()
+                merged_block['merged_from'] = group
+                merged_block['original_count'] = len(group)
+                
+                merged_blocks.append(merged_block)
+                processed_indices.update(group)
+    
+    # Add any unprocessed blocks (shouldn't happen, but safety check)
+    for i, block in enumerate(blocks):
+        if i not in processed_indices:
+            merged_blocks.append(block)
+    
+    merge_count = len(blocks) - len(merged_blocks)
+    if merge_count > 0:
+        diagnostic_print(f"Merged {merge_count} overlapping blocks")
+    
+    return merged_blocks
+
+
 def remove_contained_blocks(blocks):
     """
     Remove blocks that are completely contained within other blocks of the same class.
@@ -758,6 +947,7 @@ def remove_contained_blocks(blocks):
 def compute_block_confidence_scores(blocks, X, y):
     """
     Compute confidence scores for blocks based on overlap with other classes.
+    Enhanced version with better boundary handling and overlap detection.
     
     Args:
         blocks (list): List of hyperblock dictionaries
@@ -799,14 +989,52 @@ def compute_block_confidence_scores(blocks, X, y):
         other_class_points = sum(count for class_label, count in class_point_dict.items() 
                                if class_label != block_class)
         
-        overlap_score = other_class_points / total_points if total_points > 0 else 1.0
-        confidence_score = 1.0 - overlap_score
+        # Enhanced confidence calculation
+        if total_points > 0:
+            # Base overlap score
+            overlap_score = other_class_points / total_points
+            base_confidence = 1.0 - overlap_score
+            
+            # Volume-based penalty for large blocks (more likely to contain other classes)
+            volume = np.prod(bounds[:, 1] - bounds[:, 0])
+            volume_penalty = min(0.3, volume * 0.5)  # Cap at 30% penalty
+            
+            # Density bonus for compact blocks
+            density = own_class_points / volume if volume > 0 else 0
+            density_bonus = min(0.2, density * 0.1)  # Cap at 20% bonus
+            
+            # Boundary penalty for blocks near other classes
+            boundary_penalty = 0.0
+            if other_class_points > 0:
+                # Check if other-class points are near the boundaries
+                other_class_mask = block_point_classes != block_class
+                other_points = block_points[other_class_mask]
+                
+                # Calculate average distance to boundaries
+                boundary_distances = []
+                for point in other_points:
+                    min_dist_to_boundary = float('inf')
+                    for dim in range(len(bounds)):
+                        dist_to_lower = abs(point[dim] - bounds[dim, 0])
+                        dist_to_upper = abs(point[dim] - bounds[dim, 1])
+                        min_dist_to_boundary = min(min_dist_to_boundary, dist_to_lower, dist_to_upper)
+                    boundary_distances.append(min_dist_to_boundary)
+                
+                avg_boundary_distance = np.mean(boundary_distances)
+                if avg_boundary_distance < 0.1:  # Close to boundary
+                    boundary_penalty = 0.15
+            
+            # Final confidence score
+            confidence_score = base_confidence - volume_penalty + density_bonus - boundary_penalty
+            confidence_score = max(0.0, min(1.0, confidence_score))  # Clamp to [0, 1]
+        else:
+            confidence_score = 0.0
         
         # Penalty for blocks with very few points
         if total_points < DEFAULT_MIN_POINTS_FOR_PENALTY:
             confidence_score *= 0.5
         
-        # Containment confidence
+        # Containment confidence (simplified)
         containment_confidence = (own_class_points / (own_class_points + other_class_points) 
                                 if (own_class_points + other_class_points) > 0 else 0.0)
         
@@ -816,6 +1044,8 @@ def compute_block_confidence_scores(blocks, X, y):
         block['total_points'] = total_points
         block['own_class_points'] = own_class_points
         block['other_class_points'] = other_class_points
+        block['volume'] = np.prod(bounds[:, 1] - bounds[:, 0])
+        block['density'] = own_class_points / block['volume'] if block['volume'] > 0 else 0
     
     return blocks
 
@@ -1019,6 +1249,61 @@ def density_based_tie_breaker(blocks, block_indices, block_labels):
 # CLASSIFICATION FUNCTIONS
 # =============================================================================
 
+def analyze_boundary_case(point, block_indices, block_bounds, block_labels, blocks, norm):
+    """
+    Analyze boundary cases where a point is near multiple blocks or on boundaries.
+    
+    Args:
+        point (np.ndarray): Point to classify
+        block_indices (np.ndarray or list): Indices of relevant blocks
+        block_bounds (list): List of block bounds
+        block_labels (np.ndarray): Block class labels
+        blocks (list): List of block dictionaries
+        norm (int): Distance norm
+    
+    Returns:
+        int: Predicted class label
+    """
+    if len(block_indices) == 0:
+        return None
+    
+    # Calculate distances to all relevant blocks
+    distances = []
+    for idx in block_indices:
+        dist = distance_to_hyperblock(point, block_bounds[idx], norm)
+        distances.append((dist, idx, block_labels[idx]))
+    
+    # Sort by distance
+    distances.sort()
+    
+    # Check if point is very close to multiple blocks (boundary case)
+    min_dist = distances[0][0]
+    close_blocks = [(dist, idx, label) for dist, idx, label in distances if dist <= min_dist * 1.1]
+    
+    if len(close_blocks) > 1:
+        # Boundary case - use weighted voting based on distance and confidence
+        class_scores = {}
+        
+        for dist, idx, label in close_blocks:
+            weight = 1.0 / (1.0 + dist)  # Inverse distance weighting
+            
+            # Add confidence score if available
+            if blocks is not None and idx < len(blocks):
+                confidence = blocks[idx].get('confidence_score', 0.5)
+                weight *= (1.0 + confidence)
+            
+            if label not in class_scores:
+                class_scores[label] = 0.0
+            class_scores[label] += weight
+        
+        # Return class with highest weighted score
+        if class_scores:
+            return max(class_scores, key=class_scores.get)
+    
+    # Fallback to closest block
+    return distances[0][2]
+
+
 def classify_batch(points, block_bounds, block_labels, k, norm, blocks=None):
     """
     Classify a batch of points using hyperblocks and k-NN logic.
@@ -1027,6 +1312,7 @@ def classify_batch(points, block_bounds, block_labels, k, norm, blocks=None):
     1. First tries confidence scores if available
     2. Falls back to Copeland's method for voting ties
     3. Uses density-based tie breaker (point count / volume) for perfect ties
+    4. Enhanced boundary detection for points near multiple blocks
     
     Args:
         points (np.ndarray): Points to classify
@@ -1115,44 +1401,54 @@ def classify_batch(points, block_bounds, block_labels, k, norm, blocks=None):
             
             contained_count += 1
         else:
-            # Point is not contained - use all blocks at minimum distance
+            # Point is not contained - use boundary analysis for better accuracy
             min_dist_indices = np.where(dists == min_dist)[0]
-            classes_k = [block_labels[idx] for idx in min_dist_indices]
             
-            # Use Copeland's method for tie-breaking
-            unique_classes, counts = np.unique(classes_k, return_counts=True)
-            if len(unique_classes) == 1:
-                predictions[i] = unique_classes[0]
+            # Use boundary analysis for better handling of edge cases
+            boundary_prediction = analyze_boundary_case(
+                points[i], min_dist_indices, block_bounds, block_labels, blocks, norm
+            )
+            
+            if boundary_prediction is not None:
+                predictions[i] = boundary_prediction
             else:
-                copeland_scores = {}
-                for i_a, class_a in enumerate(unique_classes):
-                    score = 0
-                    count_a = counts[i_a]
-                    for i_b, class_b in enumerate(unique_classes):
-                        if i_a != i_b:
-                            count_b = counts[i_b]
-                            if count_a > count_b:
-                                score += 1
-                            elif count_a == count_b:
-                                score += 0.5
-                    copeland_scores[class_a] = score
+                # Fallback to original method
+                classes_k = [block_labels[idx] for idx in min_dist_indices]
+                unique_classes, counts = np.unique(classes_k, return_counts=True)
                 
-                best_class = max(copeland_scores, key=copeland_scores.get)
-                
-                # Check if there's still a tie after Copeland's method
-                max_score = copeland_scores[best_class]
-                tied_classes = [cls for cls, score in copeland_scores.items() if score == max_score]
-                
-                if len(tied_classes) > 1 and blocks is not None:
-                    # Use density-based tie breaker
-                    tied_indices = [idx for idx in min_dist_indices if block_labels[idx] in tied_classes]
-                    density_winner = density_based_tie_breaker(blocks, tied_indices, block_labels)
-                    if density_winner is not None:
-                        best_class = density_winner
-                        # Log when density tie breaker is used
-                        diagnostic_print(f"Density tie breaker used (k-NN): {tied_classes} -> {best_class}")
-                
-                predictions[i] = best_class
+                if len(unique_classes) == 1:
+                    predictions[i] = unique_classes[0]
+                else:
+                    # Use Copeland's method for tie-breaking
+                    copeland_scores = {}
+                    for i_a, class_a in enumerate(unique_classes):
+                        score = 0
+                        count_a = counts[i_a]
+                        for i_b, class_b in enumerate(unique_classes):
+                            if i_a != i_b:
+                                count_b = counts[i_b]
+                                if count_a > count_b:
+                                    score += 1
+                                elif count_a == count_b:
+                                    score += 0.5
+                        copeland_scores[class_a] = score
+                    
+                    best_class = max(copeland_scores, key=copeland_scores.get)
+                    
+                    # Check if there's still a tie after Copeland's method
+                    max_score = copeland_scores[best_class]
+                    tied_classes = [cls for cls, score in copeland_scores.items() if score == max_score]
+                    
+                    if len(tied_classes) > 1 and blocks is not None:
+                        # Use density-based tie breaker
+                        tied_indices = [idx for idx in min_dist_indices if block_labels[idx] in tied_classes]
+                        density_winner = density_based_tie_breaker(blocks, tied_indices, block_labels)
+                        if density_winner is not None:
+                            best_class = density_winner
+                            # Log when density tie breaker is used
+                            diagnostic_print(f"Density tie breaker used (k-NN): {tied_classes} -> {best_class}")
+                    
+                    predictions[i] = best_class
             
             knn_count += 1
     
@@ -1274,7 +1570,8 @@ def find_all_envelope_blocks(X, y, feature_indices, classes, pbar=None):
                                                   min_points_per_split=DEFAULT_MIN_POINTS_PER_SPLIT)
     pruned_blocks = prune_and_merge_blocks(refined_blocks)
     deduplicated_blocks = deduplicate_blocks(pruned_blocks)
-    contained_removed_blocks = remove_contained_blocks(deduplicated_blocks)
+    merged_blocks = merge_overlapping_blocks(deduplicated_blocks, overlap_threshold=0.3)
+    contained_removed_blocks = remove_contained_blocks(merged_blocks)
     scored_blocks = compute_block_confidence_scores(contained_removed_blocks, X, y)
     flagged_blocks = flag_misclassifying_blocks(scored_blocks, X, y)
     shrunk_blocks = shrink_dominant_blocks(flagged_blocks, X, y)
