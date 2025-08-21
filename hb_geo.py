@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from sklearn.metrics import accuracy_score, confusion_matrix
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
 from tqdm import tqdm
 
@@ -44,6 +44,7 @@ DEFAULT_MIN_POINTS_PER_SPLIT = 2
 # Cross-validation parameters
 DEFAULT_K_FOLDS = 10
 DEFAULT_RANDOM_STATE = 42
+DEFAULT_TEST_PERCENTAGE = 0.3  # 30% default test split
 
 # =============================================================================
 # LOGGING UTILITY FUNCTIONS
@@ -1634,8 +1635,26 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=DEFA
     encoded_classes = np.unique(y)
     total_tasks = k_folds * len(encoded_classes)
     
+    # Generate all splits first
+    splits = list(kf.split(X, y))
+    
+    # Print case count per fold
+    diagnostic_print(f"\n{k_folds}-fold Cross-Validation Split:")
+    total_dataset_size = len(X)
+    diagnostic_print(f"Total dataset: {total_dataset_size} cases")
+    
+    for fold_num, (train_index, test_index) in enumerate(splits):
+        train_count = len(train_index)
+        test_count = len(test_index)
+        diagnostic_print(f"Fold {fold_num + 1}: {train_count} train, {test_count} test")
+    
+    # Summary
+    avg_test_size = total_dataset_size / k_folds
+    diagnostic_print(f"Expected test size per fold: ~{avg_test_size:.0f} ({100/k_folds:.1f}% of data)")
+    diagnostic_print()
+    
     with tqdm(total=total_tasks, desc="Processing hyperblocks", unit="class") as pbar:
-        for fold_num, (train_index, test_index) in enumerate(kf.split(X, y)):
+        for fold_num, (train_index, test_index) in enumerate(splits):
             args_list.append((train_index, test_index, X, y, feature_indices, classes, fold_num, pbar))
             
         with ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
@@ -1877,11 +1896,14 @@ def main():
                        help='Path to single dataset CSV (default)')
     parser.add_argument('--k-folds', type=int, default=DEFAULT_K_FOLDS,
                        help='Number of cross-validation folds')
+    parser.add_argument('--test-percentage', type=float, default=DEFAULT_TEST_PERCENTAGE,
+                       help='Percentage of data to use for test split (default: 0.3)')
     parser.add_argument('--diagnostic', action='store_true', help='Enable diagnostic mode (more logging)')
     args = parser.parse_args()
     
+    # Diagnostic mode if either argument or default is set
     global DIAGNOSTIC_MODE
-    DIAGNOSTIC_MODE = args.diagnostic
+    DIAGNOSTIC_MODE = args.diagnostic or DIAGNOSTIC_MODE
 
     if args.train and args.test:
         # Separate train/test datasets
@@ -1894,6 +1916,10 @@ def main():
         y_train_raw = df_train['class'].values
         X_test_raw = df_test[features].values
         y_test_raw = df_test['class'].values
+
+        # Print the number of cases in the train and test datasets
+        diagnostic_print(f"Training set: {len(X_train_raw)} cases")
+        diagnostic_print(f"Test set: {len(X_test_raw)} cases")
         
         diagnostic_print("Preprocessing data...")
         scaler = MinMaxScaler()
@@ -1920,29 +1946,47 @@ def main():
         print(scores)
         
     else:
-        # Single dataset with cross-validation
+        # Single dataset with train/test split and cross-validation
         diagnostic_print("Loading dataset...")
         df = pd.read_csv(args.dataset)
         
         features = df.columns[:-1]
         X_raw = df[features].values
         y_raw = df['class'].values
+
+        # Print the number of cases in the dataset
+        diagnostic_print(f"Dataset: {len(X_raw)} cases")
+        diagnostic_print(f"Features: {len(features)}")
+        diagnostic_print(f"Classes: {len(np.unique(y_raw))}")
+        
+        # Split dataset into train and test sets
+        diagnostic_print(f"\nSplitting dataset: {args.test_percentage*100:.1f}% test, {(1-args.test_percentage)*100:.1f}% train")
+        X_train_raw, X_test_raw, y_train_raw, y_test_raw = train_test_split(
+            X_raw, y_raw, test_size=args.test_percentage, random_state=DEFAULT_RANDOM_STATE, stratify=y_raw
+        )
+        
+        diagnostic_print(f"Training set: {len(X_train_raw)} cases")
+        diagnostic_print(f"Test set: {len(X_test_raw)} cases")
         
         diagnostic_print("Preprocessing data...")
         scaler = MinMaxScaler()
-        X = scaler.fit_transform(X_raw)
+        X_train = scaler.fit_transform(X_train_raw)
+        X_test = scaler.transform(X_test_raw)
         
         y_encoder = LabelEncoder()
-        y = y_encoder.fit_transform(y_raw)
+        y_train = y_encoder.fit_transform(y_train_raw)
+        y_test = y_encoder.transform(y_test_raw)
         
-        feature_indices = list(range(X.shape[1]))
+        feature_indices = list(range(X_train.shape[1]))
         
-        diagnostic_print(f"Dataset shape: {X.shape}")
+        diagnostic_print(f"Training set shape: {X_train.shape}")
+        diagnostic_print(f"Test set shape: {X_test.shape}")
         diagnostic_print(f"Classes: {y_encoder.classes_}")
         diagnostic_print(f"Features: {len(feature_indices)}")
         
-        diagnostic_print("\nRunning cross-validation...")
-        scores = cross_validate_blocks(X, y, feature_indices, 
+        # Run cross-validation on training data only
+        diagnostic_print("\nRunning cross-validation on training data...")
+        scores = cross_validate_blocks(X_train, y_train, feature_indices, 
                                      y_encoder.classes_, features, args.k_folds)
         
         print("\nFinal results:")
