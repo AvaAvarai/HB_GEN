@@ -1894,6 +1894,7 @@ def main():
     parser.add_argument('--test', type=str, help='Path to test dataset CSV')
     parser.add_argument('--dataset', type=str, default='datasets/fisher_iris.csv', 
                        help='Path to single dataset CSV (default)')
+    parser.add_argument('--no-split', action='store_true', help='No train/test split')
     parser.add_argument('--k-folds', type=int, default=DEFAULT_K_FOLDS,
                        help='Number of cross-validation folds')
     parser.add_argument('--test-percentage', type=float, default=DEFAULT_TEST_PERCENTAGE,
@@ -1905,7 +1906,42 @@ def main():
     global DIAGNOSTIC_MODE
     DIAGNOSTIC_MODE = args.diagnostic or DIAGNOSTIC_MODE
 
-    if args.train and args.test:
+    if args.no_split:
+        # Single CSV file with k-fold CV on entire dataset (no train/test split)
+        diagnostic_print("Loading single CSV file for k-fold cross-validation...")
+        df = pd.read_csv(args.dataset)
+        
+        features = df.columns[:-1]
+        X_raw = df[features].values
+        y_raw = df['class'].values
+
+        # Print the number of cases in the dataset
+        diagnostic_print(f"Dataset: {len(X_raw)} cases")
+        diagnostic_print(f"Features: {len(features)}")
+        diagnostic_print(f"Classes: {len(np.unique(y_raw))}")
+        
+        diagnostic_print("Preprocessing data...")
+        scaler = MinMaxScaler()
+        X = scaler.fit_transform(X_raw)
+        
+        y_encoder = LabelEncoder()
+        y = y_encoder.fit_transform(y_raw)
+        
+        feature_indices = list(range(X.shape[1]))
+        
+        diagnostic_print(f"Dataset shape: {X.shape}")
+        diagnostic_print(f"Classes: {y_encoder.classes_}")
+        diagnostic_print(f"Features: {len(feature_indices)}")
+        
+        # Run k-fold cross-validation on entire dataset
+        diagnostic_print(f"\nRunning {args.k_folds}-fold cross-validation on entire dataset...")
+        scores = cross_validate_blocks(X, y, feature_indices, 
+                                     y_encoder.classes_, features, args.k_folds)
+        
+        print("\nFinal results:")
+        print(scores)
+        
+    elif args.train and args.test:
         # Separate train/test datasets
         diagnostic_print("Loading separate train and test datasets...")
         df_train = pd.read_csv(args.train)
