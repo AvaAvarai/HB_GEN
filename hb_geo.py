@@ -1726,6 +1726,31 @@ def cross_validate_blocks(X, y, feature_indices, classes, features, k_folds=DEFA
     print(f"Average accuracy across all folds: {avg_accuracy:.4f} +/- {std_accuracy:.4f}")
     print(f"Average blocks per fold: {avg_blocks:.1f} +/- {std_blocks:.1f}")
     
+    # Calculate block size statistics
+    all_block_sizes = []
+    all_cases_per_block = []
+    
+    for blocks in all_blocks_per_fold:
+        for block in blocks:
+            # Calculate block size (volume)
+            bounds = np.array(block['bounds'])
+            volume = np.prod(bounds[:, 1] - bounds[:, 0])
+            all_block_sizes.append(volume)
+            
+            # Calculate cases per block
+            cases = block.get('total_points', 0)
+            all_cases_per_block.append(cases)
+    
+    if all_block_sizes:
+        avg_block_size = np.mean(all_block_sizes)
+        std_block_size = np.std(all_block_sizes)
+        diagnostic_print(f"Average block size (volume): {avg_block_size:.6f} +/- {std_block_size:.6f}")
+    
+    if all_cases_per_block:
+        avg_cases_per_block = np.mean(all_cases_per_block)
+        std_cases_per_block = np.std(all_cases_per_block)
+        diagnostic_print(f"Average cases per hyperblock: {avg_cases_per_block:.1f} +/- {std_cases_per_block:.1f}")
+    
     if fold_contained:
         avg_contained = np.mean(fold_contained)
         std_contained = np.std(fold_contained)
